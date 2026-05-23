@@ -1,0 +1,150 @@
+<Window x:Class="PlutoLiveSpectrumGui.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pluto+ Live Spectrum + Waterfall"
+        Width="1320" Height="880" MinWidth="1100" MinHeight="740">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="190"/>
+            <RowDefinition Height="26"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" BorderBrush="#D0D7DE" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="110"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Project folder:" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="5" Name="ProjectFolderTextBox" Margin="0,0,8,8"/>
+                <Button Grid.Row="0" Grid.Column="6" Content="Browse..." Margin="0,0,8,8" Click="BrowseProjectFolder_Click"/>
+                <Button Grid.Row="0" Grid.Column="7" Content="Open Folder" Margin="0,0,0,8" Click="OpenProjectFolder_Click"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Center Hz:" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Name="FrequencyTextBox" Text="146520000" Margin="0,0,8,8"/>
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="Rate:" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                <TextBox Grid.Row="1" Grid.Column="3" Name="RateTextBox" Text="1000000" Margin="0,0,8,8"/>
+                <TextBlock Grid.Row="1" Grid.Column="4" Text="FFT:" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                <ComboBox Grid.Row="1" Grid.Column="5" Name="FftComboBox" Margin="0,0,8,8" SelectedIndex="1">
+                    <ComboBoxItem Content="512"/>
+                    <ComboBoxItem Content="1024"/>
+                    <ComboBoxItem Content="2048"/>
+                    <ComboBoxItem Content="4096"/>
+                </ComboBox>
+                <StackPanel Grid.Row="1" Grid.Column="6" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button Name="StartButton" Content="Start" Width="90" Margin="0,0,8,0" Click="StartButton_Click"/>
+                    <Button Name="StopButton" Content="Stop" Width="90" IsEnabled="False" Click="StopButton_Click"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Presets:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <WrapPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="7">
+                    <Button Content="FM 100.0" Width="80" Margin="0,0,8,0" Click="PresetFm_Click"/>
+                    <Button Content="NOAA" Width="70" Margin="0,0,8,0" Click="PresetNoaa_Click"/>
+                    <Button Content="2m Call" Width="75" Margin="0,0,8,0" Click="Preset2m_Click"/>
+                    <Button Content="Airband" Width="80" Margin="0,0,16,0" Click="PresetAirband_Click"/>
+
+                    <CheckBox Name="WaterfallEnabledCheckBox" Content="Waterfall" IsChecked="True" Margin="0,0,12,0"/>
+                    <CheckBox Name="ShowPeaksCheckBox" Content="Peaks" IsChecked="True" Margin="0,0,12,0"/>
+                    <CheckBox Name="AutoScaleCheckBox" Content="Auto color" IsChecked="True" Margin="0,0,12,0"/>
+                    <Button Content="Clear Waterfall" Width="125" Click="ClearWaterfall_Click"/>
+                </WrapPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="1*"/>
+                <RowDefinition Height="8"/>
+                <RowDefinition Height="0.72*"/>
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Background="#101820" BorderBrush="#D0D7DE" BorderThickness="1" CornerRadius="8" Padding="8">
+                <Grid>
+                    <Canvas Name="SpectrumCanvas" Background="#101820" SizeChanged="SpectrumCanvas_SizeChanged"/>
+                    <TextBlock Name="OverlayTextBlock" Foreground="#DDE6ED" Background="#80000000" Padding="8" Text="Ready"
+                               HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                </Grid>
+            </Border>
+            <GridSplitter Grid.Row="1" Height="8" Background="#D0D7DE" HorizontalAlignment="Stretch"/>
+            <Border Grid.Row="2" Background="#05070A" BorderBrush="#D0D7DE" BorderThickness="1" CornerRadius="8" Padding="8">
+                <Grid>
+                    <Image Name="WaterfallImage" Stretch="Fill"/>
+                    <TextBlock Name="WaterfallOverlayTextBlock" Foreground="#DDE6ED" Background="#80000000" Padding="6" Text="Waterfall"
+                               HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="2" BorderBrush="#D0D7DE" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,0,0,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.1*"/>
+                    <ColumnDefinition Width="1.1*"/>
+                    <ColumnDefinition Width="1*"/>
+                </Grid.ColumnDefinitions>
+
+                <GroupBox Grid.Column="0" Header="Streamer options" Margin="0,0,8,0">
+                    <WrapPanel Margin="8">
+                        <TextBlock Text="Avg" VerticalAlignment="Center" Margin="0,0,4,8"/>
+                        <TextBox Name="AverageTextBox" Text="2" Width="50" Margin="0,0,12,8"/>
+                        <TextBlock Text="Interval" VerticalAlignment="Center" Margin="0,0,4,8"/>
+                        <TextBox Name="IntervalTextBox" Text="200" Width="65" Margin="0,0,12,8"/>
+                        <TextBlock Text="Gain" VerticalAlignment="Center" Margin="0,0,4,8"/>
+                        <ComboBox Name="GainModeComboBox" Width="105" Margin="0,0,8,8" SelectedIndex="0">
+                            <ComboBoxItem Content="slow_attack"/>
+                            <ComboBoxItem Content="fast_attack"/>
+                            <ComboBoxItem Content="manual"/>
+                        </ComboBox>
+                        <TextBlock Text="Gain dB" VerticalAlignment="Center" Margin="0,0,4,8"/>
+                        <TextBox Name="GainDbTextBox" Width="55" Margin="0,0,12,8"/>
+                        <TextBlock Text="Extra" VerticalAlignment="Center" Margin="0,0,4,8"/>
+                        <TextBox Name="ExtraArgsTextBox" Width="300" Margin="0,0,12,8"/>
+                    </WrapPanel>
+                </GroupBox>
+
+                <GroupBox Grid.Column="1" Header="Peaks" Margin="0,0,8,0">
+                    <DockPanel Margin="8">
+                        <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <TextBlock Text="Top" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBox Name="TopPeaksTextBox" Text="10" Width="45" Margin="0,0,10,0"/>
+                            <TextBlock Text="SNR dB" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBox Name="PeakThresholdTextBox" Text="10" Width="50" Margin="0,0,10,0"/>
+                            <Button Content="Copy Peaks" Width="95" Click="CopyPeaks_Click"/>
+                        </WrapPanel>
+                        <DataGrid Name="PeaksDataGrid" AutoGenerateColumns="False" IsReadOnly="True">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Rank}" Width="36"/>
+                                <DataGridTextColumn Header="MHz" Binding="{Binding FrequencyMHz}" Width="90"/>
+                                <DataGridTextColumn Header="kHz" Binding="{Binding OffsetKHz}" Width="80"/>
+                                <DataGridTextColumn Header="dB" Binding="{Binding PowerDb}" Width="70"/>
+                                <DataGridTextColumn Header="SNR" Binding="{Binding SnrDb}" Width="70"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </GroupBox>
+
+                <GroupBox Grid.Column="2" Header="Log">
+                    <TextBox Name="LogTextBox" FontFamily="Consolas" FontSize="12" IsReadOnly="True"
+                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                </GroupBox>
+            </Grid>
+        </Border>
+
+        <StatusBar Grid.Row="3">
+            <StatusBarItem><TextBlock Name="StatusTextBlock" Text="Ready"/></StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>
