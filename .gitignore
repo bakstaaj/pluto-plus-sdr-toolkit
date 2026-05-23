@@ -1,0 +1,50 @@
+# Build outputs
+build/
+out/
+bin/
+obj/
+.vs/
+.vscode/.vs/
+
+# MSYS/CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.ninja
+.ninja_*
+
+# Native binaries and libraries
+*.exe
+*.dll
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+*.ilk
+
+# SDR generated outputs
+*_raw.csv
+*_grouped.csv
+*_activity.csv
+*_summary.csv
+*_report.html
+capture_iq_s16le.*
+*.iq
+*.raw
+*.wav
+spectrum_*.csv
+
+# GUI local/user files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
