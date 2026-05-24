@@ -3,17 +3,18 @@ set -Eeuo pipefail
 
 # package_windows_release.sh
 #
-# Consolidated reliable release packager for the Pluto+ SDR Windows Toolkit.
+# Final consolidated Windows release packager for the Pluto+ SDR Windows Toolkit.
 #
-# Fix in this version:
-#   DLL dependency copy now skips files that are already in bin/native.
-#   This prevents cp from failing with:
-#     cp: '.../VCRUNTIME140.dll' and '.../VCRUNTIME140.dll' are the same file
-#
-# Run from repository root inside MSYS2 UCRT64:
-#
-#   ./tools/package_windows_release.sh
-#   ./tools/package_windows_release.sh v0.4-test
+# Includes:
+#   - native build
+#   - native EXE copy
+#   - DLL dependency copy with same-file skip
+#   - config/docs copy
+#   - WPF GUI publish using dotnet from PATH or common Windows locations
+#   - release launcher generation
+#   - manifest generation
+#   - release verification
+#   - ZIP creation
 
 APP_NAME="pluto-plus-sdr-toolkit"
 VERSION="${1:-$(date +%Y%m%d-%H%M%S)}"
@@ -22,7 +23,6 @@ RELEASE_NAME="${APP_NAME}-${VERSION}"
 ROOT="$(pwd)"
 RELEASES_DIR="${ROOT}/releases"
 RELEASE_DIR="${RELEASES_DIR}/${RELEASE_NAME}"
-
 BUILD_DIR="${ROOT}/build/native"
 
 BIN_DIR="${RELEASE_DIR}/bin/native"
@@ -48,6 +48,27 @@ same_file() {
     fi
 
     [ "$a" = "$b" ]
+}
+
+find_dotnet() {
+    if command -v dotnet >/dev/null 2>&1; then
+        command -v dotnet
+        return 0
+    fi
+
+    for candidate in \
+        "/c/Program Files/dotnet/dotnet.exe" \
+        "/c/Program Files (x86)/dotnet/dotnet.exe" \
+        "/mnt/c/Program Files/dotnet/dotnet.exe" \
+        "/mnt/c/Program Files (x86)/dotnet/dotnet.exe"
+    do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 copy_native_dll_dependencies() {
@@ -94,8 +115,9 @@ copy_native_dll_dependencies() {
 }
 
 publish_gui_project() {
-    local project_dir="$1"
-    local out_name="$2"
+    local dotnet_exe="$1"
+    local project_dir="$2"
+    local out_name="$3"
 
     if [ ! -d "$project_dir" ]; then
         echo "  GUI source folder not found, skipping: ${project_dir}"
@@ -110,15 +132,23 @@ publish_gui_project() {
         return 0
     fi
 
-    if ! command -v dotnet >/dev/null 2>&1; then
-        echo "  dotnet not found; skipping GUI publish."
+    if [ -z "$dotnet_exe" ]; then
+        echo "  dotnet not found; skipping ${out_name} publish."
         return 0
     fi
 
-    echo "  Publishing ${out_name}..."
-    dotnet publish "$csproj" -c Release -o "${GUI_DIR}/${out_name}" --self-contained false || {
+    echo "  Publishing ${out_name}"
+    echo "    dotnet: ${dotnet_exe}"
+    echo "    project: ${csproj}"
+
+    "$dotnet_exe" publish "$csproj" -c Release -o "${GUI_DIR}/${out_name}" --self-contained false || {
         echo "  WARNING: dotnet publish failed for ${out_name}; continuing without it."
+        return 0
     }
+
+    local exe_count
+    exe_count="$(find "${GUI_DIR}/${out_name}" -maxdepth 1 -type f -name "*.exe" | wc -l | tr -d ' ')"
+    echo "    GUI EXEs published: ${exe_count}"
 }
 
 create_zip() {
@@ -149,15 +179,28 @@ verify_release() {
     local exe_count
     exe_count="$(find "$BIN_DIR" -maxdepth 1 -type f -name "*.exe" | wc -l | tr -d ' ')"
 
-    local launcher_count
-    launcher_count="$(find "$LAUNCHER_DIR" -maxdepth 1 -type f -name "*.cmd" | wc -l | tr -d ' ')"
-
     local config_count
     config_count="$(find "$CONFIG_DIR" -maxdepth 1 -type f -name "*.conf" | wc -l | tr -d ' ')"
 
-    echo "  Native EXEs: ${exe_count}"
-    echo "  Configs:     ${config_count}"
-    echo "  Launchers:   ${launcher_count}"
+    local launcher_count
+    launcher_count="$(find "$LAUNCHER_DIR" -maxdepth 1 -type f -name "*.cmd" | wc -l | tr -d ' ')"
+
+    local session_gui_count=0
+    local live_gui_count=0
+
+    if [ -d "${GUI_DIR}/PlutoSessionGui" ]; then
+        session_gui_count="$(find "${GUI_DIR}/PlutoSessionGui" -maxdepth 1 -type f -name "*.exe" | wc -l | tr -d ' ')"
+    fi
+
+    if [ -d "${GUI_DIR}/PlutoLiveSpectrumGui" ]; then
+        live_gui_count="$(find "${GUI_DIR}/PlutoLiveSpectrumGui" -maxdepth 1 -type f -name "*.exe" | wc -l | tr -d ' ')"
+    fi
+
+    echo "  Native EXEs:        ${exe_count}"
+    echo "  Configs:            ${config_count}"
+    echo "  Launchers:          ${launcher_count}"
+    echo "  Session GUI EXEs:   ${session_gui_count}"
+    echo "  Spectrum GUI EXEs:  ${live_gui_count}"
 
     [ "$exe_count" -gt 0 ] || die "No native EXEs were packaged."
     [ "$config_count" -gt 0 ] || die "No config files were packaged."
@@ -180,6 +223,14 @@ verify_release() {
         [ -f "${LAUNCHER_DIR}/${required}" ] || die "Missing launcher: ${required}"
     done
 
+    if [ "$session_gui_count" -eq 0 ]; then
+        echo "  WARNING: Session GUI was not published."
+    fi
+
+    if [ "$live_gui_count" -eq 0 ]; then
+        echo "  WARNING: Live Spectrum GUI was not published."
+    fi
+
     echo "  Release verification passed."
 }
 
@@ -188,8 +239,16 @@ echo "Root:    ${ROOT}"
 echo "Release: ${RELEASE_DIR}"
 echo
 
-[ -f "${ROOT}/tools/create_release_launchers.sh" ] || die "Missing tools/create_release_launchers.sh. Install it first."
+[ -f "${ROOT}/tools/create_release_launchers.sh" ] || die "Missing tools/create_release_launchers.sh."
 
+DOTNET_EXE=""
+if DOTNET_EXE="$(find_dotnet)"; then
+    echo "Using dotnet: ${DOTNET_EXE}"
+else
+    echo "WARNING: dotnet was not found. GUI publishing will be skipped."
+fi
+
+echo
 echo "Building native tools..."
 cmake -S . -B build -G Ninja
 cmake --build build
@@ -223,11 +282,8 @@ done
 
 echo
 echo "Copying configs..."
-if [ -d "${ROOT}/configs" ]; then
-    cp -rv "${ROOT}/configs/"* "$CONFIG_DIR/" || true
-else
-    die "configs folder not found."
-fi
+[ -d "${ROOT}/configs" ] || die "configs folder not found."
+cp -rv "${ROOT}/configs/"* "$CONFIG_DIR/" || true
 
 echo
 echo "Copying documentation..."
@@ -271,11 +327,11 @@ EOF
 
 echo
 echo "Publishing WPF GUIs..."
-publish_gui_project "${ROOT}/gui/PlutoGuiStarter_v3_RepoLayout" "PlutoSessionGui"
-publish_gui_project "${ROOT}/gui/PlutoLiveSpectrumGui_v5_RepoLayout_FM" "PlutoLiveSpectrumGui"
+publish_gui_project "$DOTNET_EXE" "${ROOT}/gui/PlutoGuiStarter_v3_RepoLayout" "PlutoSessionGui"
+publish_gui_project "$DOTNET_EXE" "${ROOT}/gui/PlutoLiveSpectrumGui_v5_RepoLayout_FM" "PlutoLiveSpectrumGui"
 
 echo
-echo "Creating launchers with known-good generator..."
+echo "Creating launchers..."
 bash "${ROOT}/tools/create_release_launchers.sh" "$RELEASE_DIR"
 
 echo
@@ -284,6 +340,7 @@ echo "Writing manifest..."
     echo "Pluto+ SDR Windows Toolkit Release"
     echo "Release: ${RELEASE_NAME}"
     echo "Created: $(date)"
+    echo "dotnet: ${DOTNET_EXE:-not found}"
     echo
     echo "Native EXEs:"
     find "$BIN_DIR" -maxdepth 1 -name "*.exe" -printf "  %f\n" | sort
@@ -296,6 +353,20 @@ echo "Writing manifest..."
     echo
     echo "Launchers:"
     find "$LAUNCHER_DIR" -maxdepth 1 -name "*.cmd" -printf "  %f\n" | sort
+    echo
+    echo "Session GUI files:"
+    if [ -d "${GUI_DIR}/PlutoSessionGui" ]; then
+        find "${GUI_DIR}/PlutoSessionGui" -maxdepth 1 -type f -printf "  %f\n" | sort
+    else
+        echo "  not published"
+    fi
+    echo
+    echo "Live Spectrum GUI files:"
+    if [ -d "${GUI_DIR}/PlutoLiveSpectrumGui" ]; then
+        find "${GUI_DIR}/PlutoLiveSpectrumGui" -maxdepth 1 -type f -printf "  %f\n" | sort
+    else
+        echo "  not published"
+    fi
 } > "${RELEASE_DIR}/MANIFEST.txt"
 
 verify_release

@@ -1,60 +1,39 @@
 # Windows Release Process
 
-The release process is now intentionally simple:
+The canonical release process is:
 
 ```bash
-./tools/package_windows_release.sh v0.4-test
+./tools/package_windows_release.sh v0.6-test
 ```
 
 The script:
 
 1. Builds native tools into `build/native/`.
 2. Creates `releases/pluto-plus-sdr-toolkit-<version>/`.
-3. Copies native EXEs into `bin/native/`.
-4. Copies MSYS2/UCRT64 DLL dependencies when `ldd` can find them.
-5. Copies `configs/`, `docs/`, and `README.md`.
-6. Publishes WPF GUIs if `dotnet` is available.
-7. Calls `tools/create_release_launchers.sh`.
-8. Verifies native tools, configs, and launchers.
-9. Creates a ZIP.
+3. Copies native EXEs and DLL dependencies into `bin/native/`.
+4. Copies `configs/`, `docs/`, and `README.md`.
+5. Publishes WPF GUIs if `dotnet` is available.
+6. Creates Windows `.cmd` launchers.
+7. Writes `MANIFEST.txt`.
+8. Verifies native tools, configs, launchers, and GUI publish status.
+9. Creates the ZIP.
 
-## Output
+## Verify release
 
-```text
-releases/pluto-plus-sdr-toolkit-<version>/
-releases/pluto-plus-sdr-toolkit-<version>.zip
+```bash
+cat releases/pluto-plus-sdr-toolkit-v0.6-test/MANIFEST.txt
+ls -la releases/pluto-plus-sdr-toolkit-v0.6-test/launchers
+ls -la releases/pluto-plus-sdr-toolkit-v0.6-test/gui/PlutoSessionGui
+ls -la releases/pluto-plus-sdr-toolkit-v0.6-test/gui/PlutoLiveSpectrumGui
 ```
 
-## Required release launchers
+## GUI launchers
 
-The package fails if these are missing:
-
-```text
-run_fm_scan.cmd
-run_2m_scan.cmd
-run_noaa_scan.cmd
-start_session_gui.cmd
-start_live_spectrum_gui.cmd
-```
-
-## First test after packaging
-
-From Windows Explorer, open:
+The GUI launchers search for any `.exe` in the published GUI folder:
 
 ```text
-releases\pluto-plus-sdr-toolkit-<version>\launchers\
+gui\PlutoSessionGui\*.exe
+gui\PlutoLiveSpectrumGui\*.exe
 ```
 
-Then run:
-
-```text
-run_noaa_scan.cmd
-run_fm_scan.cmd
-start_live_spectrum_gui.cmd
-```
-
-Generated scan results are written to:
-
-```text
-sessions\
-```
+This avoids hard-coding a single executable name.

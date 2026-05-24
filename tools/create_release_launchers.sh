@@ -6,21 +6,14 @@ set -Eeuo pipefail
 # Standalone release launcher generator.
 #
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.3-release-test
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.6-release
 
-ROOT="$(pwd)"
 RELEASE_DIR="${1:-}"
 
-if [ -z "${RELEASE_DIR}" ]; then
-    echo "ERROR: release folder argument is required."
+if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
+    echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.3-release-test"
-    exit 1
-fi
-
-if [ ! -d "${RELEASE_DIR}" ]; then
-    echo "ERROR: Release folder does not exist:"
-    echo "  ${RELEASE_DIR}"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.6-release"
     exit 1
 fi
 
@@ -171,19 +164,29 @@ write_file "start_session_gui.cmd" <<'EOF'
 setlocal
 
 set "RELEASE_ROOT=%~dp0.."
-set "GUI_EXE=%RELEASE_ROOT%\gui\PlutoSessionGui\PlutoGuiStarter.exe"
+set "GUI_DIR=%RELEASE_ROOT%\gui\PlutoSessionGui"
 
-if exist "%GUI_EXE%" (
-    start "" "%GUI_EXE%"
+if not exist "%GUI_DIR%" (
+    echo Session GUI folder was not found.
+    echo Expected:
+    echo   %GUI_DIR%
+    echo.
+    echo The release may have been created without dotnet available to publish the GUI.
+    pause
+    exit /b 1
+)
+
+for %%F in ("%GUI_DIR%\*.exe") do (
+    start "" "%%~fF"
     exit /b 0
 )
 
-echo Session GUI executable was not found.
-echo Expected:
-echo   %GUI_EXE%
+echo Session GUI executable was not found in:
+echo   %GUI_DIR%
 echo.
-echo If the GUI was not published, run the source GUI with dotnet run.
+dir "%GUI_DIR%"
 pause
+exit /b 1
 EOF
 
 write_file "start_live_spectrum_gui.cmd" <<'EOF'
@@ -191,19 +194,29 @@ write_file "start_live_spectrum_gui.cmd" <<'EOF'
 setlocal
 
 set "RELEASE_ROOT=%~dp0.."
-set "GUI_EXE=%RELEASE_ROOT%\gui\PlutoLiveSpectrumGui\PlutoLiveSpectrumGui.exe"
+set "GUI_DIR=%RELEASE_ROOT%\gui\PlutoLiveSpectrumGui"
 
-if exist "%GUI_EXE%" (
-    start "" "%GUI_EXE%"
+if not exist "%GUI_DIR%" (
+    echo Live Spectrum GUI folder was not found.
+    echo Expected:
+    echo   %GUI_DIR%
+    echo.
+    echo The release may have been created without dotnet available to publish the GUI.
+    pause
+    exit /b 1
+)
+
+for %%F in ("%GUI_DIR%\*.exe") do (
+    start "" "%%~fF"
     exit /b 0
 )
 
-echo Live Spectrum GUI executable was not found.
-echo Expected:
-echo   %GUI_EXE%
+echo Live Spectrum GUI executable was not found in:
+echo   %GUI_DIR%
 echo.
-echo If the GUI was not published, run the source GUI with dotnet run.
+dir "%GUI_DIR%"
 pause
+exit /b 1
 EOF
 
 write_file "start_live_spectrum_stream_fm.cmd" <<'EOF'
