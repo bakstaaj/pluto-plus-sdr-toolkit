@@ -3,18 +3,13 @@ set -Eeuo pipefail
 
 # package_windows_release.sh
 #
-# Final consolidated Windows release packager for the Pluto+ SDR Windows Toolkit.
+# Consolidated Windows release packager for the Pluto+ SDR Windows Toolkit.
 #
-# Includes:
-#   - native build
-#   - native EXE copy
-#   - DLL dependency copy with same-file skip
-#   - config/docs copy
-#   - WPF GUI publish using dotnet from PATH or common Windows locations
-#   - release launcher generation
-#   - manifest generation
-#   - release verification
-#   - ZIP creation
+# Includes audio monitor release integration:
+#   - verifies pluto_audio_monitor.exe when source is present
+#   - packages pluto_audio_monitor.exe
+#   - creates run_noaa_audio.cmd release launcher
+#   - includes audio docs in release docs
 
 APP_NAME="pluto-plus-sdr-toolkit"
 VERSION="${1:-$(date +%Y%m%d-%H%M%S)}"
@@ -204,7 +199,7 @@ verify_release() {
 
     [ "$exe_count" -gt 0 ] || die "No native EXEs were packaged."
     [ "$config_count" -gt 0 ] || die "No config files were packaged."
-    [ "$launcher_count" -ge 10 ] || die "Expected at least 10 launchers, found ${launcher_count}."
+    [ "$launcher_count" -ge 11 ] || die "Expected at least 11 launchers, found ${launcher_count}."
 
     for required in \
         pluto_scan_session.exe \
@@ -212,6 +207,11 @@ verify_release() {
     do
         [ -f "${BIN_DIR}/${required}" ] || die "Missing native tool: ${required}"
     done
+
+    if [ -f "${ROOT}/native/src/pluto_audio_monitor.c" ]; then
+        [ -f "${BIN_DIR}/pluto_audio_monitor.exe" ] || die "Missing audio tool: pluto_audio_monitor.exe"
+        [ -f "${LAUNCHER_DIR}/run_noaa_audio.cmd" ] || die "Missing audio launcher: run_noaa_audio.cmd"
+    fi
 
     for required in \
         run_fm_scan.cmd \
@@ -303,6 +303,7 @@ Quick start:
 
   launchers\run_noaa_scan.cmd
   launchers\run_fm_scan.cmd
+  launchers\run_noaa_audio.cmd
   launchers\start_session_gui.cmd
   launchers\start_live_spectrum_gui.cmd
 
@@ -313,9 +314,9 @@ Folder layout:
   launchers\      Double-click Windows launchers
   gui\            Published WPF GUI apps, if available
   docs\           Documentation
-  sessions\       Generated CSV and HTML reports go here
+  sessions\       Generated CSV, WAV, and HTML reports go here
 
-Generated reports and CSV files are written to:
+Generated reports, WAV files, and CSV files are written to:
 
   sessions\
 

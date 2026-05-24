@@ -6,14 +6,14 @@ set -Eeuo pipefail
 # Standalone release launcher generator.
 #
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.6-release
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.7-audio
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.6-release"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.7-audio"
     exit 1
 fi
 
@@ -151,6 +151,49 @@ write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband"
 write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA"
 write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm"
 
+write_file "run_noaa_audio.cmd" <<'EOF'
+@echo off
+setlocal
+
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+
+mkdir "%SESSION_DIR%" 2>nul
+cd /d "%SESSION_DIR%"
+
+set "PATH=%BIN_DIR%;%PATH%"
+
+if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
+    echo ERROR: pluto_audio_monitor.exe not found:
+    echo   %BIN_DIR%\pluto_audio_monitor.exe
+    pause
+    exit /b 1
+)
+
+echo Recording NOAA NFM audio for 30 seconds...
+echo Output:
+echo   %SESSION_DIR%\noaa.wav
+echo.
+
+"%BIN_DIR%\pluto_audio_monitor.exe" --mode nfm --freq 162550000 --rate 960000 --audio-rate 48000 --seconds 30 --wav noaa.wav %*
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: NOAA audio recording failed.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Done.
+echo WAV file:
+echo   %SESSION_DIR%\noaa.wav
+
+start "" "%SESSION_DIR%"
+pause
+EOF
+
 write_file "open_sessions_folder.cmd" <<'EOF'
 @echo off
 setlocal
@@ -248,8 +291,8 @@ find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 echo
 echo "Launcher count: ${count}"
 
-if [ "${count}" -lt 10 ]; then
-    echo "ERROR: Expected 10 launchers, found ${count}."
+if [ "${count}" -lt 11 ]; then
+    echo "ERROR: Expected at least 11 launchers, found ${count}."
     exit 1
 fi
 
