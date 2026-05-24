@@ -63,3 +63,9 @@ target_link_libraries(pluto_audio_monitor PRIVATE PkgConfig::LIBIIO PkgConfig::L
 if (MINGW)
     target_compile_options(pluto_audio_monitor PRIVATE -Wall -Wextra -O2)
 endif()
+
+add_executable(pluto_audio_report src/pluto_audio_report.c)
+
+if (MINGW)
+    target_compile_options(pluto_audio_report PRIVATE -Wall -Wextra -O2)
+endif()
