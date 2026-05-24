@@ -5,21 +5,19 @@ set -Eeuo pipefail
 #
 # Standalone release launcher generator.
 #
-# v2 CSV fix:
-#   run_noaa_audio.cmd now passes:
-#     --csv audio_log.csv
-#   so the release session folder gets:
-#     sessions\audio_log.csv
+# Adds release launchers for:
+#   run_noaa_audio.cmd
+#   run_airband_audio.cmd
 #
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.8-audio-v2
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.9-airband-audio
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.8-audio-v2"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.9-airband-audio"
     exit 1
 fi
 
@@ -204,6 +202,58 @@ start "" "%SESSION_DIR%"
 pause
 EOF
 
+write_file "run_airband_audio.cmd" <<'EOF'
+@echo off
+setlocal
+
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+
+mkdir "%SESSION_DIR%" 2>nul
+cd /d "%SESSION_DIR%"
+
+set "PATH=%BIN_DIR%;%PATH%"
+
+if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
+    echo ERROR: pluto_audio_monitor.exe not found:
+    echo   %BIN_DIR%\pluto_audio_monitor.exe
+    pause
+    exit /b 1
+)
+
+echo Recording airband AM audio for 60 seconds...
+echo Default preset:
+echo   airband-125, 125.000 MHz
+echo Output WAV:
+echo   %SESSION_DIR%\airband_am.wav
+echo Output CSV:
+echo   %SESSION_DIR%\audio_log.csv
+echo.
+echo Airband transmissions are intermittent. If this is silent, try a longer run:
+echo   run_airband_audio.cmd --seconds 180 --squelch-db -70
+echo.
+
+"%BIN_DIR%\pluto_audio_monitor.exe" --mode am --preset airband-125 --rate 960000 --audio-rate 48000 --seconds 60 --squelch-db -65 --wav airband_am.wav --csv audio_log.csv %*
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: airband AM audio recording failed.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Done.
+echo WAV file:
+echo   %SESSION_DIR%\airband_am.wav
+echo CSV log:
+echo   %SESSION_DIR%\audio_log.csv
+
+start "" "%SESSION_DIR%"
+pause
+EOF
+
 write_file "open_sessions_folder.cmd" <<'EOF'
 @echo off
 setlocal
@@ -297,13 +347,23 @@ find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 echo
 echo "Launcher count: ${count}"
 
-if [ "${count}" -lt 11 ]; then
-    echo "ERROR: Expected at least 11 launchers, found ${count}."
+if [ "${count}" -lt 12 ]; then
+    echo "ERROR: Expected at least 12 launchers, found ${count}."
     exit 1
 fi
 
 if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_noaa_audio.cmd"; then
     echo "ERROR: run_noaa_audio.cmd is missing --csv audio_log.csv"
+    exit 1
+fi
+
+if ! grep -q -- "--mode am" "${LAUNCHER_DIR}/run_airband_audio.cmd"; then
+    echo "ERROR: run_airband_audio.cmd is missing --mode am"
+    exit 1
+fi
+
+if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_airband_audio.cmd"; then
+    echo "ERROR: run_airband_audio.cmd is missing --csv audio_log.csv"
     exit 1
 fi
 
