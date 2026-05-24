@@ -5,11 +5,12 @@ set -Eeuo pipefail
 #
 # Consolidated Windows release packager for the Pluto+ SDR Windows Toolkit.
 #
-# Airband audio release integration:
+# WBFM release integration:
 #   - packages pluto_audio_monitor.exe
 #   - creates run_noaa_audio.cmd
 #   - creates run_airband_audio.cmd
-#   - verifies both audio launchers exist
+#   - creates run_fm_audio.cmd
+#   - verifies all audio launchers exist
 
 APP_NAME="pluto-plus-sdr-toolkit"
 VERSION="${1:-$(date +%Y%m%d-%H%M%S)}"
@@ -199,7 +200,7 @@ verify_release() {
 
     [ "$exe_count" -gt 0 ] || die "No native EXEs were packaged."
     [ "$config_count" -gt 0 ] || die "No config files were packaged."
-    [ "$launcher_count" -ge 12 ] || die "Expected at least 12 launchers, found ${launcher_count}."
+    [ "$launcher_count" -ge 13 ] || die "Expected at least 13 launchers, found ${launcher_count}."
 
     for required in \
         pluto_scan_session.exe \
@@ -212,6 +213,7 @@ verify_release() {
         [ -f "${BIN_DIR}/pluto_audio_monitor.exe" ] || die "Missing audio tool: pluto_audio_monitor.exe"
         [ -f "${LAUNCHER_DIR}/run_noaa_audio.cmd" ] || die "Missing audio launcher: run_noaa_audio.cmd"
         [ -f "${LAUNCHER_DIR}/run_airband_audio.cmd" ] || die "Missing audio launcher: run_airband_audio.cmd"
+        [ -f "${LAUNCHER_DIR}/run_fm_audio.cmd" ] || die "Missing audio launcher: run_fm_audio.cmd"
     fi
 
     for required in \
@@ -306,6 +308,7 @@ Quick start:
   launchers\run_fm_scan.cmd
   launchers\run_noaa_audio.cmd
   launchers\run_airband_audio.cmd
+  launchers\run_fm_audio.cmd
   launchers\start_session_gui.cmd
   launchers\start_live_spectrum_gui.cmd
 

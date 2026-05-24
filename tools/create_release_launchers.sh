@@ -8,16 +8,17 @@ set -Eeuo pipefail
 # Adds release launchers for:
 #   run_noaa_audio.cmd
 #   run_airband_audio.cmd
+#   run_fm_audio.cmd
 #
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.9-airband-audio
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.0-audio-modes
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.9-airband-audio"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.0-audio-modes"
     exit 1
 fi
 
@@ -149,11 +150,11 @@ echo   %SESSION_DIR%
 pause
 EOF
 
-write_scan_launcher "run_fm_scan.cmd" "fm.conf" "fm" "FM broadcast"
-write_scan_launcher "run_2m_scan.cmd" "2m.conf" "2m" "2 meter"
-write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband"
-write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA"
-write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm"
+write_scan_launcher "run_fm_scan.cmd" "fm.conf" "fm" "FM broadcast scan"
+write_scan_launcher "run_2m_scan.cmd" "2m.conf" "2m" "2 meter scan"
+write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband scan"
+write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA scan"
+write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm scan"
 
 write_file "run_noaa_audio.cmd" <<'EOF'
 @echo off
@@ -254,6 +255,59 @@ start "" "%SESSION_DIR%"
 pause
 EOF
 
+write_file "run_fm_audio.cmd" <<'EOF'
+@echo off
+setlocal
+
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+
+mkdir "%SESSION_DIR%" 2>nul
+cd /d "%SESSION_DIR%"
+
+set "PATH=%BIN_DIR%;%PATH%"
+
+if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
+    echo ERROR: pluto_audio_monitor.exe not found:
+    echo   %BIN_DIR%\pluto_audio_monitor.exe
+    pause
+    exit /b 1
+)
+
+echo Recording broadcast FM WBFM audio for 30 seconds...
+echo Default preset:
+echo   fm-100, 100.000 MHz
+echo Output WAV:
+echo   %SESSION_DIR%\fm100.wav
+echo Output CSV:
+echo   %SESSION_DIR%\audio_log.csv
+echo.
+echo To use a different station:
+echo   run_fm_audio.cmd --preset fm-94
+echo   run_fm_audio.cmd --mode wbfm --freq 98700000
+echo.
+
+"%BIN_DIR%\pluto_audio_monitor.exe" --preset fm-100 --seconds 30 --squelch-off --wav fm100.wav --csv audio_log.csv %*
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: broadcast FM WBFM audio recording failed.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Done.
+echo WAV file:
+echo   %SESSION_DIR%\fm100.wav
+echo CSV log:
+echo   %SESSION_DIR%\audio_log.csv
+
+start "" "%SESSION_DIR%"
+pause
+EOF
+
 write_file "open_sessions_folder.cmd" <<'EOF'
 @echo off
 setlocal
@@ -347,13 +401,13 @@ find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 echo
 echo "Launcher count: ${count}"
 
-if [ "${count}" -lt 12 ]; then
-    echo "ERROR: Expected at least 12 launchers, found ${count}."
+if [ "${count}" -lt 13 ]; then
+    echo "ERROR: Expected at least 13 launchers, found ${count}."
     exit 1
 fi
 
-if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_noaa_audio.cmd"; then
-    echo "ERROR: run_noaa_audio.cmd is missing --csv audio_log.csv"
+if ! grep -q -- "--mode nfm" "${LAUNCHER_DIR}/run_noaa_audio.cmd"; then
+    echo "ERROR: run_noaa_audio.cmd is missing --mode nfm"
     exit 1
 fi
 
@@ -362,8 +416,13 @@ if ! grep -q -- "--mode am" "${LAUNCHER_DIR}/run_airband_audio.cmd"; then
     exit 1
 fi
 
-if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_airband_audio.cmd"; then
-    echo "ERROR: run_airband_audio.cmd is missing --csv audio_log.csv"
+if ! grep -q -- "--preset fm-100" "${LAUNCHER_DIR}/run_fm_audio.cmd"; then
+    echo "ERROR: run_fm_audio.cmd is missing --preset fm-100"
+    exit 1
+fi
+
+if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_fm_audio.cmd"; then
+    echo "ERROR: run_fm_audio.cmd is missing --csv audio_log.csv"
     exit 1
 fi
 
