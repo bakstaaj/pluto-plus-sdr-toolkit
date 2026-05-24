@@ -8,16 +8,22 @@ set -Eeuo pipefail
 # Includes:
 #   scan launchers
 #   audio launchers
-#   audio menu launcher with fixed quoting
+#   report-aware audio menu launcher with fixed quoting
 #   audio HTML report launcher
 #   GUI launchers
+#
+# Permanent audio menu report workflow:
+#   run_audio_menu.cmd can now generate/open audio_report.html directly.
+#
+# Usage:
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.4-audio-report-menu
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.3-audio-report"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.4-audio-report-menu"
     exit 1
 fi
 
@@ -95,7 +101,7 @@ write_scan_launcher "run_fm_scan.cmd" "fm.conf" "fm" "FM broadcast scan"
 write_scan_launcher "run_2m_scan.cmd" "2m.conf" "2m" "2 meter scan"
 write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband scan"
 write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA scan"
-write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm scan"
+write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70 cm" "70 cm scan"
 
 write_file "run_profile.cmd" <<'EOF'
 @echo off
@@ -281,16 +287,21 @@ write_file "run_audio_menu.cmd" <<'EOF'
 setlocal EnableDelayedExpansion
 
 REM Pluto+ SDR Audio Menu Launcher
-REM Release version. Uses fixed quoted execution:
-REM   "%AUDIO_EXE%" !ARGS!
+REM Release version.
+REM
+REM Features:
+REM   - Records NOAA NFM, airband AM, and broadcast FM WBFM audio
+REM   - Uses safe quoted execution:
+REM       "%AUDIO_EXE%" !ARGS!
+REM   - Can generate sessions\audio_report.html using pluto_audio_report.exe
+REM   - Offers to update the report after each successful recording
 
 set "RELEASE_ROOT=%~dp0.."
 set "BIN_DIR=%RELEASE_ROOT%\bin\native"
 set "SESSION_DIR=%RELEASE_ROOT%\sessions"
 set "AUDIO_EXE=%BIN_DIR%\pluto_audio_monitor.exe"
+set "REPORT_EXE=%BIN_DIR%\pluto_audio_report.exe"
 
-mkdir "%SESSION_DIR%" 2>nul
-cd /d "%SESSION_DIR%"
 set "PATH=%BIN_DIR%;%PATH%"
 
 if not exist "%AUDIO_EXE%" (
@@ -302,6 +313,9 @@ if not exist "%AUDIO_EXE%" (
     exit /b 1
 )
 
+mkdir "%SESSION_DIR%" 2>nul
+cd /d "%SESSION_DIR%"
+
 :menu
 cls
 echo Pluto+ SDR Audio Menu
@@ -310,15 +324,16 @@ echo.
 echo Output folder:
 echo   %SESSION_DIR%
 echo.
-echo  1. NOAA NFM, 162.550 MHz, 30 seconds
-echo  2. NOAA NFM, choose NOAA preset
-echo  3. Airband AM, 125.000 MHz, 60 seconds
-echo  4. Airband AM, long capture, 180 seconds
-echo  5. Broadcast FM WBFM, 100.000 MHz, 30 seconds
-echo  6. Broadcast FM WBFM, choose FM preset
-echo  7. Custom frequency and mode
-echo  8. Open sessions folder
-echo  9. Exit
+echo  1.  NOAA NFM, 162.550 MHz, 30 seconds
+echo  2.  NOAA NFM, choose NOAA preset
+echo  3.  Airband AM, 125.000 MHz, 60 seconds
+echo  4.  Airband AM, long capture, 180 seconds
+echo  5.  Broadcast FM WBFM, 100.000 MHz, 30 seconds
+echo  6.  Broadcast FM WBFM, choose FM preset
+echo  7.  Custom frequency and mode
+echo  8.  Generate / open audio HTML report
+echo  9.  Open sessions folder
+echo  10. Exit
 echo.
 set /p CHOICE="Select option: "
 
@@ -329,8 +344,9 @@ if "%CHOICE%"=="4" goto airband_long
 if "%CHOICE%"=="5" goto fm_default
 if "%CHOICE%"=="6" goto fm_choose
 if "%CHOICE%"=="7" goto custom
-if "%CHOICE%"=="8" goto open_folder
-if "%CHOICE%"=="9" goto done
+if "%CHOICE%"=="8" goto make_report
+if "%CHOICE%"=="9" goto open_folder
+if "%CHOICE%"=="10" goto done
 
 echo.
 echo Invalid choice.
@@ -391,9 +407,9 @@ cls
 echo Custom audio capture
 echo.
 echo Modes:
-echo   nfm
-echo   am
-echo   wbfm
+echo   nfm   NOAA / 2m FM voice
+echo   am    airband AM
+echo   wbfm  FM broadcast
 echo.
 set /p MODE="Mode [nfm/am/wbfm]: "
 if "%MODE%"=="" set "MODE=nfm"
@@ -439,9 +455,58 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done. Output folder:
+echo Recording complete.
+echo Output folder:
 echo   %SESSION_DIR%
 echo.
+
+if exist "%REPORT_EXE%" if exist "%SESSION_DIR%\audio_log.csv" (
+    set /p GENREPORT="Generate/update audio_report.html now? [Y/n]: "
+    if /I not "!GENREPORT!"=="n" goto make_report
+)
+
+pause
+goto menu
+
+:make_report
+cls
+echo Generating audio report...
+echo.
+
+if not exist "%REPORT_EXE%" (
+    echo ERROR: pluto_audio_report.exe was not found.
+    echo Expected:
+    echo   %REPORT_EXE%
+    echo.
+    echo The release package may be incomplete.
+    pause
+    goto menu
+)
+
+if not exist "%SESSION_DIR%\audio_log.csv" (
+    echo ERROR: audio_log.csv was not found:
+    echo   %SESSION_DIR%\audio_log.csv
+    echo.
+    echo Record audio first.
+    pause
+    goto menu
+)
+
+"%REPORT_EXE%" --in "%SESSION_DIR%\audio_log.csv" --out "%SESSION_DIR%\audio_report.html"
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: audio report generation failed.
+    pause
+    goto menu
+)
+
+echo.
+echo Audio report written:
+echo   %SESSION_DIR%\audio_report.html
+echo.
+
+start "" "%SESSION_DIR%\audio_report.html"
 pause
 goto menu
 
@@ -607,6 +672,16 @@ done
 
 if ! grep -q '"%AUDIO_EXE%" !ARGS!' "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
     echo "ERROR: run_audio_menu.cmd does not contain fixed quoted execution."
+    exit 1
+fi
+
+if ! grep -q "Generate/update audio_report.html now" "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
+    echo "ERROR: run_audio_menu.cmd does not contain report workflow prompt."
+    exit 1
+fi
+
+if ! grep -q "pluto_audio_report.exe" "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
+    echo "ERROR: run_audio_menu.cmd does not reference pluto_audio_report.exe."
     exit 1
 fi
 
