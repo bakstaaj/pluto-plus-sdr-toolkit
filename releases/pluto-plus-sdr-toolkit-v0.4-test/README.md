@@ -9,10 +9,10 @@ This project defaults to the user's Pluto+ SDR configuration with receive covera
 ## Main workflows
 
 ```bash
-./build/native/pluto_scan_session.exe --config configs/2m.conf
-./build/native/pluto_scan_session.exe --config configs/fm.conf
-./build/native/pluto_scan_session.exe --config configs/airband.conf
-./build/native/pluto_scan_session.exe --config configs/noaa.conf
+./build/pluto_scan_session.exe --config configs/2m.conf
+./build/pluto_scan_session.exe --config configs/fm.conf
+./build/pluto_scan_session.exe --config configs/airband.conf
+./build/pluto_scan_session.exe --config configs/noaa.conf
 ```
 
 ## Build native tools

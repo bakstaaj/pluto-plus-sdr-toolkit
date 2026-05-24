@@ -10,8 +10,8 @@ cd /d "%PROJECT_DIR%"
 set "MSYS2_ROOT=C:\msys64"
 set "PATH=%MSYS2_ROOT%\ucrt64\bin;%MSYS2_ROOT%\usr\bin;%PATH%"
 
-if not exist "build\pluto_scan_session.exe" (
-    echo ERROR: build\pluto_scan_session.exe was not found.
+if not exist "build\native\pluto_scan_session.exe" (
+    echo ERROR: build\native\pluto_scan_session.exe was not found.
     pause
     exit /b 1
 )
@@ -25,7 +25,7 @@ if not exist "configs\fm.conf" (
 echo Running Pluto+ FM broadcast scan session...
 echo.
 
-build\pluto_scan_session.exe --config configs\fm.conf %*
+build\native\pluto_scan_session.exe --config configs\fm.conf %*
 
 if errorlevel 1 (
     echo.

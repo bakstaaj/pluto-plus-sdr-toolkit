@@ -1,0 +1,55 @@
+Pluto+ SDR Windows Toolkit Release
+Release: pluto-plus-sdr-toolkit-v0.4-test
+Created: Sat May 23 19:56:07 PDT 2026
+
+Native EXEs:
+  pluto_activity_monitor.exe
+  pluto_activity_summary.exe
+  pluto_band_scan.exe
+  pluto_fft_scanner.exe
+  pluto_iq_recorder.exe
+  pluto_probe.exe
+  pluto_rx_capture.exe
+  pluto_scan_group.exe
+  pluto_scan_session.exe
+  pluto_session_report.exe
+  pluto_spectrum_stream.exe
+  pluto_sweep_scanner.exe
+
+Native DLLs:
+  ADVAPI32.dll
+  KERNELBASE.dll
+  RPCRT4.dll
+  SETUPAPI.dll
+  VCRUNTIME140.dll
+  WS2_32.dll
+  WSOCK32.dll
+  libad9361.dll
+  libfftw3-3.dll
+  libiio.dll
+  libserialport-0.dll
+  libusb-1.0.dll
+  libxml2.dll
+  msvcrt.dll
+  ntdll.dll
+  sechost.dll
+  ucrtbase.dll
+
+Config files:
+  2m.conf
+  70cm.conf
+  airband.conf
+  fm.conf
+  noaa.conf
+
+Launchers:
+  open_sessions_folder.cmd
+  run_2m_scan.cmd
+  run_70cm_scan.cmd
+  run_airband_scan.cmd
+  run_fm_scan.cmd
+  run_noaa_scan.cmd
+  run_profile.cmd
+  start_live_spectrum_gui.cmd
+  start_live_spectrum_stream_fm.cmd
+  start_session_gui.cmd

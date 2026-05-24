@@ -3,34 +3,18 @@ set -Eeuo pipefail
 
 # create_release_launchers.sh
 #
-# Standalone repair tool.
+# Standalone release launcher generator.
 #
-# Usage from repo root:
-#
+# Usage:
 #   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.3-release-test
-#
-# Or with no argument, it uses the newest releases/pluto-plus-sdr-toolkit-* folder:
-#
-#   ./tools/create_release_launchers.sh
-#
-# This script does not build anything. It only writes launchers into:
-#
-#   <release-folder>/launchers/
 
 ROOT="$(pwd)"
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ]; then
-    if [ ! -d "${ROOT}/releases" ]; then
-        echo "ERROR: releases folder not found."
-        exit 1
-    fi
-
-    RELEASE_DIR="$(find "${ROOT}/releases" -maxdepth 1 -type d -name 'pluto-plus-sdr-toolkit-*' | sort | tail -n 1 || true)"
-fi
-
-if [ -z "${RELEASE_DIR}" ]; then
-    echo "ERROR: Could not find a release folder."
+    echo "ERROR: release folder argument is required."
+    echo "Usage:"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.3-release-test"
     exit 1
 fi
 
@@ -41,7 +25,6 @@ if [ ! -d "${RELEASE_DIR}" ]; then
 fi
 
 LAUNCHER_DIR="${RELEASE_DIR}/launchers"
-
 mkdir -p "${LAUNCHER_DIR}"
 
 echo "Writing launchers into:"
@@ -50,8 +33,6 @@ echo
 
 write_file() {
     local file="$1"
-    shift
-
     cat > "${LAUNCHER_DIR}/${file}"
     chmod 0644 "${LAUNCHER_DIR}/${file}" 2>/dev/null || true
     echo "  wrote ${file}"
@@ -247,7 +228,7 @@ pause
 EOF
 
 echo
-echo "Verifying:"
+echo "Verifying release launchers:"
 count="$(find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' | wc -l | tr -d ' ')"
 find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 
@@ -260,4 +241,4 @@ if [ "${count}" -lt 10 ]; then
 fi
 
 echo
-echo "Release launchers repaired successfully."
+echo "Release launchers created successfully."
