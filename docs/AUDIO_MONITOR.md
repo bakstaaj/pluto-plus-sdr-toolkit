@@ -5,8 +5,9 @@
 ## Supported modes
 
 ```text
-nfm  Narrow FM demodulation, useful for NOAA and 2m FM voice
-am   AM envelope demodulation, useful for VHF airband
+nfm   Narrow FM demodulation, useful for NOAA and 2m FM voice
+am    AM envelope demodulation, useful for VHF airband
+wbfm  Wide FM demodulation, useful for FM broadcast band tests
 ```
 
 ## Output folder convention
@@ -24,7 +25,7 @@ mkdir -p sessions
   --preset noaa7 \
   --seconds 10 \
   --squelch-db -65 \
-  --wav sessions/noaa_v2_test.wav \
+  --wav sessions/noaa.wav \
   --csv sessions/audio_log.csv
 ```
 
@@ -34,57 +35,57 @@ mkdir -p sessions
 ./build/native/pluto_audio_monitor.exe \
   --mode am \
   --preset airband-125 \
-  --seconds 20 \
+  --seconds 30 \
   --squelch-db -65 \
-  --wav sessions/airband_am_test.wav \
+  --wav sessions/airband_am.wav \
   --csv sessions/audio_log.csv
 ```
 
-## Airband presets
-
-```text
-airband-118   118.000 MHz
-airband-120   120.000 MHz
-airband-1228  122.800 MHz
-airband-125   125.000 MHz
-airband-1275  127.500 MHz
-airband-130   130.000 MHz
-```
-
-## Useful AM options
-
-If the airband channel is quiet or intermittent, use a longer recording:
+## Broadcast FM WBFM test
 
 ```bash
 ./build/native/pluto_audio_monitor.exe \
-  --mode am \
-  --preset airband-125 \
-  --seconds 120 \
-  --squelch-db -70 \
-  --wav sessions/airband_long.wav \
+  --preset fm-100 \
+  --seconds 30 \
+  --squelch-off \
+  --wav sessions/fm100.wav \
   --csv sessions/audio_log.csv
 ```
 
-If squelch is closing too aggressively:
+## FM broadcast presets
 
 ```text
---squelch-db -75
+fm-88   88.000 MHz
+fm-90   90.000 MHz
+fm-94   94.000 MHz
+fm-98   98.000 MHz
+fm-100  100.000 MHz
+fm-102  102.000 MHz
+fm-104  104.000 MHz
+fm-106  106.000 MHz
 ```
 
-If you want to record everything:
+## WBFM notes
+
+This is mono WBFM audio only. It does not decode stereo multiplex or RDS.
+
+WBFM defaults:
 
 ```text
---squelch-off
+sample rate:      2400000
+RF bandwidth:     1800000
+audio low-pass:   15000 Hz
+de-emphasis:      75 us
 ```
 
 If audio is too low:
 
 ```text
---volume 5
+--volume 1.5
 ```
 
 If audio clips:
 
 ```text
---volume 1.5
+--volume 0.4
 ```
