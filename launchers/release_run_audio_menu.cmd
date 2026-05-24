@@ -11,24 +11,20 @@ REM       "%AUDIO_EXE%" !ARGS!
 REM   - Can generate sessions\audio_report.html using pluto_audio_report.exe
 REM   - Offers to update the report after each successful recording
 
-set "PROJECT_DIR=%~dp0.."
-cd /d "%PROJECT_DIR%"
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+set "AUDIO_EXE=%BIN_DIR%\pluto_audio_monitor.exe"
+set "REPORT_EXE=%BIN_DIR%\pluto_audio_report.exe"
 
-set "MSYS2_ROOT=C:\msys64"
-set "PATH=%MSYS2_ROOT%\ucrt64\bin;%MSYS2_ROOT%\usr\bin;%PATH%"
-
-set "AUDIO_EXE=%PROJECT_DIR%\build\native\pluto_audio_monitor.exe"
-set "REPORT_EXE=%PROJECT_DIR%\build\native\pluto_audio_report.exe"
-set "SESSION_DIR=%PROJECT_DIR%\sessions"
+set "PATH=%BIN_DIR%;%PATH%"
 
 if not exist "%AUDIO_EXE%" (
     echo ERROR: pluto_audio_monitor.exe was not found.
     echo Expected:
     echo   %AUDIO_EXE%
     echo.
-    echo Build first from MSYS2 UCRT64:
-    echo   cd ~/sdrdev/pluto_native_test
-    echo   ./tools/build_native_ucrt64.sh
+    echo The release package may be incomplete.
     pause
     exit /b 1
 )
@@ -199,7 +195,7 @@ if not exist "%REPORT_EXE%" (
     echo   %REPORT_EXE%
     echo.
     echo Build first:
-    echo   ./tools/build_native_ucrt64.sh
+    echo The release package may be incomplete.
     pause
     goto menu
 )
