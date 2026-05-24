@@ -3,8 +3,6 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#else
-#include <unistd.h>
 #endif
 
 #include <errno.h>
@@ -14,47 +12,84 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /*
    pluto_audio_monitor.c
 
-   First audio/demod milestone for the Pluto+ SDR Windows Toolkit.
+   Audio monitor for the Pluto+ SDR Windows Toolkit.
 
-   Current supported mode:
-     nfm  - narrow FM demodulation to 16-bit PCM WAV
+   Supported modes:
+     nfm  - narrow FM demodulation to 16-bit mono PCM WAV
+     am   - AM envelope demodulation to 16-bit mono PCM WAV
 
-   Good first test target:
-     NOAA weather radio:
-       162.400 MHz
-       162.425 MHz
-       162.450 MHz
-       162.475 MHz
-       162.500 MHz
-       162.525 MHz
-       162.550 MHz
+   Features:
+     - Squelch gate based on RF power dBFS
+     - Per-second signal/audio stats on console
+     - Optional summary CSV append log
+     - NOAA, 2m, and airband preset shortcuts
+     - Automatic timestamped WAV filename if --wav is not supplied
 
-   Example:
+   Example NFM NOAA:
      ./build/native/pluto_audio_monitor.exe \
-       --mode nfm \
-       --freq 162550000 \
-       --rate 960000 \
-       --audio-rate 48000 \
+       --preset noaa7 \
        --seconds 30 \
-       --wav noaa.wav
+       --squelch-db -65 \
+       --wav sessions/noaa.wav \
+       --csv sessions/audio_log.csv
 
-   Notes:
-     - Defaults assume Pluto+ coverage down to at least 70 MHz.
-     - This is intentionally simple and self-contained.
-     - FM demod is phase-difference demodulation.
-     - Audio is low-pass filtered and written as mono 16-bit PCM WAV.
+   Example AM airband:
+     ./build/native/pluto_audio_monitor.exe \
+       --mode am \
+       --preset airband-125 \
+       --seconds 30 \
+       --squelch-db -65 \
+       --wav sessions/airband_am.wav \
+       --csv sessions/audio_log.csv
 */
 
 #define PI_CONST 3.14159265358979323846
+#define MAX_PATH_TEXT 512
+
+typedef struct {
+    const char *name;
+    long long freq_hz;
+    const char *default_mode;
+} preset_t;
+
+static const preset_t presets[] = {
+    {"noaa1", 162400000LL, "nfm"},
+    {"noaa2", 162425000LL, "nfm"},
+    {"noaa3", 162450000LL, "nfm"},
+    {"noaa4", 162475000LL, "nfm"},
+    {"noaa5", 162500000LL, "nfm"},
+    {"noaa6", 162525000LL, "nfm"},
+    {"noaa7", 162550000LL, "nfm"},
+    {"noaa-162400", 162400000LL, "nfm"},
+    {"noaa-162425", 162425000LL, "nfm"},
+    {"noaa-162450", 162450000LL, "nfm"},
+    {"noaa-162475", 162475000LL, "nfm"},
+    {"noaa-162500", 162500000LL, "nfm"},
+    {"noaa-162525", 162525000LL, "nfm"},
+    {"noaa-162550", 162550000LL, "nfm"},
+    {"2m-call", 146520000LL, "nfm"},
+
+    {"airband-118", 118000000LL, "am"},
+    {"airband-120", 120000000LL, "am"},
+    {"airband-1228", 122800000LL, "am"},
+    {"airband-125", 125000000LL, "am"},
+    {"airband-1275", 127500000LL, "am"},
+    {"airband-130", 130000000LL, "am"}
+};
 
 typedef struct {
     const char *uri;
     const char *mode;
     const char *wav_path;
+    const char *csv_path;
+    const char *preset_name;
+
+    char auto_wav_path[MAX_PATH_TEXT];
 
     long long freq_hz;
     long long sample_rate_hz;
@@ -68,8 +103,13 @@ typedef struct {
     double audio_lowpass_hz;
     double volume;
 
+    double squelch_db;
+    bool squelch_enabled;
+
     const char *gain_mode;
     bool use_manual_gain;
+    bool wav_path_was_set;
+    bool mode_was_set;
 } app_config_t;
 
 typedef struct {
@@ -78,34 +118,65 @@ typedef struct {
     uint32_t samples_written;
 } wav_writer_t;
 
+typedef struct {
+    double rf_sum_db;
+    double rf_min_db;
+    double rf_max_db;
+
+    double audio_sum_sq;
+    double audio_peak;
+
+    uint64_t raw_samples;
+    uint64_t audio_samples;
+    uint64_t squelch_open_raw_samples;
+    uint64_t squelch_closed_raw_samples;
+
+    uint32_t last_printed_second;
+} stats_t;
+
 static void print_usage(const char *prog)
 {
     printf("\n");
     printf("Pluto+ Audio Monitor\n");
     printf("\n");
     printf("Usage:\n");
-    printf("  %s --mode nfm --freq <hz> --wav <file.wav> [options]\n", prog);
+    printf("  %s [--mode nfm|am] [--freq <hz> | --preset <name>] [options]\n", prog);
     printf("\n");
     printf("Options:\n");
     printf("  --uri <uri>             IIO URI, default ip:192.168.2.1\n");
-    printf("  --mode <mode>           Demod mode: nfm, default nfm\n");
+    printf("  --mode <mode>           nfm or am, default nfm unless preset has a mode\n");
+    printf("  --preset <name>         noaa1..noaa7, 2m-call, airband-125, etc.\n");
     printf("  --freq <hz>             RX center frequency Hz, default 162550000\n");
     printf("  --rate <hz>             SDR sample rate Hz, default 960000\n");
     printf("  --bw <hz>               RF bandwidth Hz, default 200000\n");
     printf("  --audio-rate <hz>       WAV audio sample rate, default 48000\n");
     printf("  --audio-lowpass-hz <hz> Audio low-pass cutoff, default 5000\n");
     printf("  --seconds <n>           Capture duration seconds, default 30\n");
-    printf("  --wav <file>            Output WAV file, default noaa.wav\n");
+    printf("  --wav <file>            Output WAV file, default auto timestamped name\n");
+    printf("  --csv <file>            Append summary CSV row\n");
     printf("  --volume <value>        Audio gain multiplier, default 3.0\n");
+    printf("  --squelch-db <dbfs>     RF squelch threshold dBFS, default -65\n");
+    printf("  --squelch-off           Disable squelch\n");
     printf("  --buffer-samples <n>    RX buffer samples, default 4096\n");
     printf("  --gain-mode <mode>      slow_attack, fast_attack, manual, default slow_attack\n");
     printf("  --gain-db <db>          Manual RX gain dB, implies manual gain mode\n");
     printf("  --help                  Show this help\n");
     printf("\n");
+    printf("NOAA presets:\n");
+    printf("  noaa1 162.400 MHz ... noaa7 162.550 MHz\n");
+    printf("\n");
+    printf("Airband AM presets:\n");
+    printf("  airband-118   118.000 MHz\n");
+    printf("  airband-120   120.000 MHz\n");
+    printf("  airband-1228  122.800 MHz\n");
+    printf("  airband-125   125.000 MHz\n");
+    printf("  airband-1275  127.500 MHz\n");
+    printf("  airband-130   130.000 MHz\n");
+    printf("\n");
     printf("Examples:\n");
-    printf("  %s --mode nfm --freq 162550000 --seconds 30 --wav noaa.wav\n", prog);
-    printf("  %s --mode nfm --freq 146520000 --seconds 20 --wav 2m_call.wav\n", prog);
-    printf("  %s --mode nfm --freq 162550000 --gain-mode manual --gain-db 40 --wav noaa.wav\n", prog);
+    printf("  %s --preset noaa7 --seconds 30 --wav sessions/noaa.wav --csv sessions/audio_log.csv\n", prog);
+    printf("  %s --mode am --preset airband-125 --seconds 30 --wav sessions/airband_am.wav --csv sessions/audio_log.csv\n", prog);
+    printf("  %s --mode am --freq 125000000 --seconds 30 --squelch-off --wav sessions/airband_open.wav\n", prog);
     printf("\n");
 }
 
@@ -151,11 +222,65 @@ static bool parse_double_value(const char *text, double *value)
     return true;
 }
 
+static bool lookup_preset(const char *name, long long *freq_hz, const char **default_mode)
+{
+    size_t count = sizeof(presets) / sizeof(presets[0]);
+
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(name, presets[i].name) == 0) {
+            *freq_hz = presets[i].freq_hz;
+            *default_mode = presets[i].default_mode;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void make_timestamp(char *out, size_t out_size)
+{
+    time_t now = time(NULL);
+    struct tm tm_value;
+
+#ifdef _WIN32
+    localtime_s(&tm_value, &now);
+#else
+    localtime_r(&now, &tm_value);
+#endif
+
+    strftime(out, out_size, "%Y%m%d_%H%M%S", &tm_value);
+}
+
+static void make_auto_wav_path(app_config_t *cfg)
+{
+    char timestamp[32];
+    make_timestamp(timestamp, sizeof(timestamp));
+
+    const char *prefix = "audio";
+    if (cfg->preset_name && strlen(cfg->preset_name) > 0) {
+        prefix = cfg->preset_name;
+    }
+
+    snprintf(cfg->auto_wav_path, sizeof(cfg->auto_wav_path),
+             "%s_%s_%lld_%s.wav", prefix, cfg->mode, cfg->freq_hz, timestamp);
+
+    cfg->wav_path = cfg->auto_wav_path;
+}
+
+static bool is_valid_mode(const char *mode)
+{
+    return strcmp(mode, "nfm") == 0 || strcmp(mode, "am") == 0;
+}
+
 static bool parse_args(int argc, char **argv, app_config_t *cfg)
 {
     cfg->uri = "ip:192.168.2.1";
     cfg->mode = "nfm";
-    cfg->wav_path = "noaa.wav";
+    cfg->wav_path = NULL;
+    cfg->csv_path = NULL;
+    cfg->preset_name = NULL;
+
+    cfg->auto_wav_path[0] = '\0';
 
     cfg->freq_hz = 162550000LL;
     cfg->sample_rate_hz = 960000LL;
@@ -169,8 +294,13 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
     cfg->audio_lowpass_hz = 5000.0;
     cfg->volume = 3.0;
 
+    cfg->squelch_db = -65.0;
+    cfg->squelch_enabled = true;
+
     cfg->gain_mode = "slow_attack";
     cfg->use_manual_gain = false;
+    cfg->wav_path_was_set = false;
+    cfg->mode_was_set = false;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -190,6 +320,25 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
                 return false;
             }
             cfg->mode = argv[i];
+            cfg->mode_was_set = true;
+        } else if (strcmp(arg, "--preset") == 0) {
+            const char *preset_mode = NULL;
+
+            if (++i >= argc) {
+                fprintf(stderr, "ERROR: --preset requires a value\n");
+                return false;
+            }
+
+            cfg->preset_name = argv[i];
+
+            if (!lookup_preset(cfg->preset_name, &cfg->freq_hz, &preset_mode)) {
+                fprintf(stderr, "ERROR: unknown preset: %s\n", cfg->preset_name);
+                return false;
+            }
+
+            if (!cfg->mode_was_set && preset_mode) {
+                cfg->mode = preset_mode;
+            }
         } else if (strcmp(arg, "--freq") == 0) {
             if (++i >= argc || !parse_ll(argv[i], &cfg->freq_hz)) {
                 fprintf(stderr, "ERROR: --freq requires integer Hz\n");
@@ -226,11 +375,26 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
                 return false;
             }
             cfg->wav_path = argv[i];
+            cfg->wav_path_was_set = true;
+        } else if (strcmp(arg, "--csv") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "ERROR: --csv requires a filename\n");
+                return false;
+            }
+            cfg->csv_path = argv[i];
         } else if (strcmp(arg, "--volume") == 0) {
             if (++i >= argc || !parse_double_value(argv[i], &cfg->volume)) {
                 fprintf(stderr, "ERROR: --volume requires a numeric value\n");
                 return false;
             }
+        } else if (strcmp(arg, "--squelch-db") == 0) {
+            if (++i >= argc || !parse_double_value(argv[i], &cfg->squelch_db)) {
+                fprintf(stderr, "ERROR: --squelch-db requires a numeric dBFS value\n");
+                return false;
+            }
+            cfg->squelch_enabled = true;
+        } else if (strcmp(arg, "--squelch-off") == 0) {
+            cfg->squelch_enabled = false;
         } else if (strcmp(arg, "--buffer-samples") == 0) {
             if (++i >= argc || !parse_int_value(argv[i], &cfg->buffer_samples)) {
                 fprintf(stderr, "ERROR: --buffer-samples requires integer samples\n");
@@ -255,8 +419,8 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
         }
     }
 
-    if (strcmp(cfg->mode, "nfm") != 0) {
-        fprintf(stderr, "ERROR: only --mode nfm is supported in this first audio milestone\n");
+    if (!is_valid_mode(cfg->mode)) {
+        fprintf(stderr, "ERROR: --mode must be nfm or am\n");
         return false;
     }
 
@@ -278,6 +442,10 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
     if (cfg->volume <= 0.0) {
         fprintf(stderr, "ERROR: volume must be positive\n");
         return false;
+    }
+
+    if (!cfg->wav_path) {
+        make_auto_wav_path(cfg);
     }
 
     return true;
@@ -310,9 +478,6 @@ static bool wav_open(wav_writer_t *wav, const char *path, uint32_t sample_rate)
     wav->sample_rate = sample_rate;
     wav->samples_written = 0;
 
-    /*
-       Placeholder 44-byte WAV header. Sizes are updated in wav_close().
-    */
     fwrite("RIFF", 1, 4, wav->fp);
     write_le_u32(wav->fp, 0);
     fwrite("WAVE", 1, 4, wav->fp);
@@ -359,6 +524,73 @@ static void wav_close(wav_writer_t *wav)
 
     fclose(wav->fp);
     wav->fp = NULL;
+}
+
+static bool file_exists(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        return false;
+    }
+    fclose(fp);
+    return true;
+}
+
+static void append_csv_summary(const app_config_t *cfg, const stats_t *stats, const wav_writer_t *wav)
+{
+    if (!cfg->csv_path) {
+        return;
+    }
+
+    bool exists = file_exists(cfg->csv_path);
+    FILE *fp = fopen(cfg->csv_path, "a");
+
+    if (!fp) {
+        fprintf(stderr, "WARNING: could not open CSV log: %s\n", cfg->csv_path);
+        return;
+    }
+
+    if (!exists) {
+        fprintf(fp,
+                "timestamp,preset,mode,freq_hz,seconds,wav_path,sample_rate_hz,audio_rate_hz,"
+                "gain_mode,manual_gain_db,squelch_enabled,squelch_db,"
+                "rf_avg_dbfs,rf_min_dbfs,rf_max_dbfs,audio_rms,audio_peak,"
+                "squelch_open_pct,audio_samples\n");
+    }
+
+    char timestamp[32];
+    make_timestamp(timestamp, sizeof(timestamp));
+
+    double rf_avg = stats->raw_samples > 0 ? stats->rf_sum_db / (double)stats->raw_samples : -999.0;
+    double audio_rms = stats->audio_samples > 0 ? sqrt(stats->audio_sum_sq / (double)stats->audio_samples) : 0.0;
+    double open_pct = stats->raw_samples > 0
+        ? (100.0 * (double)stats->squelch_open_raw_samples / (double)stats->raw_samples)
+        : 0.0;
+
+    fprintf(fp,
+            "%s,%s,%s,%lld,%d,%s,%lld,%d,%s,%lld,%d,%.2f,"
+            "%.2f,%.2f,%.2f,%.6f,%.6f,%.2f,%u\n",
+            timestamp,
+            cfg->preset_name ? cfg->preset_name : "",
+            cfg->mode,
+            cfg->freq_hz,
+            cfg->seconds,
+            cfg->wav_path,
+            cfg->sample_rate_hz,
+            cfg->audio_rate_hz,
+            cfg->gain_mode,
+            cfg->use_manual_gain ? cfg->manual_gain_db : 0,
+            cfg->squelch_enabled ? 1 : 0,
+            cfg->squelch_db,
+            rf_avg,
+            stats->rf_min_db,
+            stats->rf_max_db,
+            audio_rms,
+            stats->audio_peak,
+            open_pct,
+            wav->samples_written);
+
+    fclose(fp);
 }
 
 static int write_attr_ll(struct iio_channel *ch, const char *attr, long long value)
@@ -417,6 +649,77 @@ static void cleanup(struct iio_buffer *rxbuf, struct iio_context *ctx, wav_write
     }
 }
 
+static void stats_init(stats_t *stats)
+{
+    memset(stats, 0, sizeof(*stats));
+    stats->rf_min_db = 999.0;
+    stats->rf_max_db = -999.0;
+}
+
+static void stats_update_rf(stats_t *stats, double rf_db, bool squelch_open)
+{
+    stats->raw_samples++;
+    stats->rf_sum_db += rf_db;
+
+    if (rf_db < stats->rf_min_db) {
+        stats->rf_min_db = rf_db;
+    }
+
+    if (rf_db > stats->rf_max_db) {
+        stats->rf_max_db = rf_db;
+    }
+
+    if (squelch_open) {
+        stats->squelch_open_raw_samples++;
+    } else {
+        stats->squelch_closed_raw_samples++;
+    }
+}
+
+static void stats_update_audio(stats_t *stats, double audio)
+{
+    double abs_audio = fabs(audio);
+
+    stats->audio_samples++;
+    stats->audio_sum_sq += audio * audio;
+
+    if (abs_audio > stats->audio_peak) {
+        stats->audio_peak = abs_audio;
+    }
+}
+
+static void stats_maybe_print(stats_t *stats, uint32_t audio_written, uint32_t audio_rate, uint32_t target_audio_samples)
+{
+    if (audio_rate == 0) {
+        return;
+    }
+
+    uint32_t sec = audio_written / audio_rate;
+
+    if (sec == stats->last_printed_second) {
+        return;
+    }
+
+    stats->last_printed_second = sec;
+
+    double rf_avg = stats->raw_samples > 0 ? stats->rf_sum_db / (double)stats->raw_samples : -999.0;
+    double audio_rms = stats->audio_samples > 0 ? sqrt(stats->audio_sum_sq / (double)stats->audio_samples) : 0.0;
+    double open_pct = stats->raw_samples > 0
+        ? (100.0 * (double)stats->squelch_open_raw_samples / (double)stats->raw_samples)
+        : 0.0;
+
+    printf("\r%3u sec  audio %u/%u  RF avg %.1f dBFS max %.1f  audio RMS %.4f peak %.4f  squelch %.1f%% open",
+           sec,
+           audio_written,
+           target_audio_samples,
+           rf_avg,
+           stats->rf_max_db,
+           audio_rms,
+           stats->audio_peak,
+           open_pct);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
     app_config_t cfg;
@@ -431,6 +734,7 @@ int main(int argc, char **argv)
     printf("--------------------\n");
     printf("URI:              %s\n", cfg.uri);
     printf("Mode:             %s\n", cfg.mode);
+    printf("Preset:           %s\n", cfg.preset_name ? cfg.preset_name : "(none)");
     printf("Frequency:        %lld Hz\n", cfg.freq_hz);
     printf("Sample rate:      %lld Hz\n", cfg.sample_rate_hz);
     printf("RF bandwidth:     %lld Hz\n", cfg.bandwidth_hz);
@@ -438,13 +742,18 @@ int main(int argc, char **argv)
     printf("Audio low-pass:   %.1f Hz\n", cfg.audio_lowpass_hz);
     printf("Duration:         %d seconds\n", cfg.seconds);
     printf("WAV output:       %s\n", cfg.wav_path);
+    printf("CSV log:          %s\n", cfg.csv_path ? cfg.csv_path : "(none)");
     printf("Gain mode:        %s\n", cfg.gain_mode);
 
     if (cfg.use_manual_gain) {
         printf("Manual gain:      %lld dB\n", cfg.manual_gain_db);
     }
 
-    printf("\n");
+    printf("Squelch:          %s", cfg.squelch_enabled ? "enabled" : "disabled");
+    if (cfg.squelch_enabled) {
+        printf(", %.1f dBFS", cfg.squelch_db);
+    }
+    printf("\n\n");
 
     wav_writer_t wav;
     struct iio_context *ctx = NULL;
@@ -521,8 +830,8 @@ int main(int argc, char **argv)
     const double input_rate = (double)cfg.sample_rate_hz;
     const double output_rate = (double)cfg.audio_rate_hz;
     const double output_step = input_rate / output_rate;
-
     const double lp_alpha = 1.0 - exp((-2.0 * PI_CONST * cfg.audio_lowpass_hz) / input_rate);
+    const double am_dc_alpha = 1.0 - exp((-2.0 * PI_CONST * 20.0) / input_rate);
 
     double prev_i = 1.0;
     double prev_q = 0.0;
@@ -530,16 +839,19 @@ int main(int argc, char **argv)
 
     double filt_prev = 0.0;
     double filt_current = 0.0;
+    double am_dc = 0.0;
 
     double input_index = 0.0;
     double next_output_index = 1.0;
 
-    uint64_t raw_samples_processed = 0;
+    stats_t stats;
+    stats_init(&stats);
 
     while (wav.samples_written < target_audio_samples) {
         ssize_t nbytes = iio_buffer_refill(rxbuf);
         if (nbytes < 0) {
-            fprintf(stderr, "ERROR: RX buffer refill failed: %zd\n", nbytes);
+            fprintf(stderr, "\nERROR: RX buffer refill failed: %zd\n", nbytes);
+            append_csv_summary(&cfg, &stats, &wav);
             cleanup(rxbuf, ctx, &wav);
             return 1;
         }
@@ -558,35 +870,43 @@ int main(int argc, char **argv)
 
             double i_now = (double)i_s16 / 32768.0;
             double q_now = (double)q_s16 / 32768.0;
+            double mag2 = i_now * i_now + q_now * q_now;
+            double mag = sqrt(mag2);
+            double rf_db = 10.0 * log10(mag2 + 1e-12);
+            bool squelch_open = (!cfg.squelch_enabled) || (rf_db >= cfg.squelch_db);
 
-            if (!have_prev) {
+            stats_update_rf(&stats, rf_db, squelch_open);
+
+            double audio = 0.0;
+
+            if (strcmp(cfg.mode, "nfm") == 0) {
+                if (!have_prev) {
+                    prev_i = i_now;
+                    prev_q = q_now;
+                    have_prev = true;
+                    continue;
+                }
+
+                double cross = prev_i * q_now - prev_q * i_now;
+                double dot = prev_i * i_now + prev_q * q_now;
+                double dphi = atan2(cross, dot);
+
                 prev_i = i_now;
                 prev_q = q_now;
-                have_prev = true;
-                continue;
+
+                audio = dphi * cfg.volume;
+            } else {
+                am_dc = am_dc + am_dc_alpha * (mag - am_dc);
+                audio = (mag - am_dc) * cfg.volume * 4.0;
             }
 
-            /*
-               Phase difference FM demod:
-                 dphi = atan2(cross, dot)
-            */
-            double cross = prev_i * q_now - prev_q * i_now;
-            double dot = prev_i * i_now + prev_q * q_now;
-            double dphi = atan2(cross, dot);
-
-            prev_i = i_now;
-            prev_q = q_now;
-
-            /*
-               Normalize NFM phase swing to audio-ish scale.
-               The multiplier is intentionally conservative; user can change --volume.
-            */
-            double audio = dphi * cfg.volume;
+            if (!squelch_open) {
+                audio = 0.0;
+            }
 
             filt_prev = filt_current;
             filt_current = filt_current + lp_alpha * (audio - filt_current);
 
-            raw_samples_processed++;
             input_index += 1.0;
 
             while (wav.samples_written < target_audio_samples && input_index >= next_output_index) {
@@ -598,23 +918,39 @@ int main(int argc, char **argv)
                 }
 
                 double interpolated = filt_prev + frac * (filt_current - filt_prev);
+                stats_update_audio(&stats, interpolated);
                 wav_write_sample(&wav, float_to_s16(interpolated));
 
                 next_output_index += output_step;
             }
         }
 
-        if ((wav.samples_written % (uint32_t)cfg.audio_rate_hz) < 512) {
-            printf("\rAudio samples: %u / %u", wav.samples_written, target_audio_samples);
-            fflush(stdout);
-        }
+        stats_maybe_print(&stats, wav.samples_written, (uint32_t)cfg.audio_rate_hz, target_audio_samples);
     }
 
-    printf("\n");
-    printf("Done.\n");
-    printf("Raw IQ samples processed: %llu\n", (unsigned long long)raw_samples_processed);
-    printf("Audio samples written:    %u\n", wav.samples_written);
-    printf("WAV file:                 %s\n", cfg.wav_path);
+    printf("\nDone.\n");
+
+    double rf_avg = stats.raw_samples > 0 ? stats.rf_sum_db / (double)stats.raw_samples : -999.0;
+    double audio_rms = stats.audio_samples > 0 ? sqrt(stats.audio_sum_sq / (double)stats.audio_samples) : 0.0;
+    double open_pct = stats.raw_samples > 0
+        ? (100.0 * (double)stats.squelch_open_raw_samples / (double)stats.raw_samples)
+        : 0.0;
+
+    printf("RF average:            %.2f dBFS\n", rf_avg);
+    printf("RF minimum:            %.2f dBFS\n", stats.rf_min_db);
+    printf("RF maximum:            %.2f dBFS\n", stats.rf_max_db);
+    printf("Audio RMS:             %.6f\n", audio_rms);
+    printf("Audio peak:            %.6f\n", stats.audio_peak);
+    printf("Squelch open:          %.2f %%\n", open_pct);
+    printf("Raw IQ samples:        %llu\n", (unsigned long long)stats.raw_samples);
+    printf("Audio samples written: %u\n", wav.samples_written);
+    printf("WAV file:              %s\n", cfg.wav_path);
+
+    append_csv_summary(&cfg, &stats, &wav);
+
+    if (cfg.csv_path) {
+        printf("CSV log:               %s\n", cfg.csv_path);
+    }
 
     cleanup(rxbuf, ctx, &wav);
     return 0;

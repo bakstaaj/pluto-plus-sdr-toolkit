@@ -1,27 +1,25 @@
-# Pluto+ Audio Monitor v2
+# Pluto+ Audio Monitor
 
-`pluto_audio_monitor.exe` records narrow-FM audio from the Pluto+ SDR into a mono 16-bit PCM WAV file.
+`pluto_audio_monitor.exe` records demodulated audio from the Pluto+ SDR into a mono 16-bit PCM WAV file.
 
-## Important path note
-
-The audio monitor writes `--wav` and `--csv` exactly where you tell it.
-
-If you run this from the repo root:
-
-```bash
-./build/native/pluto_audio_monitor.exe --preset noaa7 --wav noaa.wav --csv audio_log.csv
-```
-
-then the files are written to the repo root:
+## Supported modes
 
 ```text
-C:\msys64\home\jim\sdrdev\pluto_native_test\
+nfm  Narrow FM demodulation, useful for NOAA and 2m FM voice
+am   AM envelope demodulation, useful for VHF airband
 ```
 
-Recommended project convention:
+## Output folder convention
+
+Use the `sessions/` folder for generated WAV and CSV files:
 
 ```bash
 mkdir -p sessions
+```
+
+## NOAA NFM test
+
+```bash
 ./build/native/pluto_audio_monitor.exe \
   --preset noaa7 \
   --seconds 10 \
@@ -30,79 +28,63 @@ mkdir -p sessions
   --csv sessions/audio_log.csv
 ```
 
-That writes:
-
-```text
-sessions\noaa_v2_test.wav
-sessions\audio_log.csv
-```
-
-The `launchers\run_noaa_audio.cmd` launcher already changes into the `sessions\` folder before running the tool, so its output goes to `sessions\` automatically.
-
-## New in v2
-
-- RF squelch with `--squelch-db`
-- `--squelch-off`
-- Per-second console stats
-- Final RF/audio/squelch summary
-- Optional summary CSV append log with `--csv`
-- NOAA presets
-- Automatic timestamped WAV filename if `--wav` is omitted
-
-## Build
+## Airband AM test
 
 ```bash
-./tools/build_native_ucrt64.sh
-```
-
-## NOAA test
-
-```bash
-mkdir -p sessions
-
 ./build/native/pluto_audio_monitor.exe \
-  --preset noaa7 \
-  --seconds 10 \
+  --mode am \
+  --preset airband-125 \
+  --seconds 20 \
   --squelch-db -65 \
-  --wav sessions/noaa_v2_test.wav \
+  --wav sessions/airband_am_test.wav \
   --csv sessions/audio_log.csv
 ```
 
-## NOAA presets
+## Airband presets
 
 ```text
-noaa1        162.400 MHz
-noaa2        162.425 MHz
-noaa3        162.450 MHz
-noaa4        162.475 MHz
-noaa5        162.500 MHz
-noaa6        162.525 MHz
-noaa7        162.550 MHz
-noaa-162550  162.550 MHz
+airband-118   118.000 MHz
+airband-120   120.000 MHz
+airband-1228  122.800 MHz
+airband-125   125.000 MHz
+airband-1275  127.500 MHz
+airband-130   130.000 MHz
 ```
 
-## Disable squelch
+## Useful AM options
+
+If the airband channel is quiet or intermittent, use a longer recording:
 
 ```bash
 ./build/native/pluto_audio_monitor.exe \
-  --preset noaa7 \
-  --seconds 10 \
-  --squelch-off \
-  --wav sessions/noaa_no_squelch.wav
-```
-
-## CSV log
-
-```bash
-./build/native/pluto_audio_monitor.exe \
-  --preset noaa7 \
-  --seconds 10 \
-  --wav sessions/noaa.wav \
+  --mode am \
+  --preset airband-125 \
+  --seconds 120 \
+  --squelch-db -70 \
+  --wav sessions/airband_long.wav \
   --csv sessions/audio_log.csv
 ```
 
-## Open output folder
+If squelch is closing too aggressively:
 
-```bash
-explorer.exe sessions
+```text
+--squelch-db -75
+```
+
+If you want to record everything:
+
+```text
+--squelch-off
+```
+
+If audio is too low:
+
+```text
+--volume 5
+```
+
+If audio clips:
+
+```text
+--volume 1.5
 ```
