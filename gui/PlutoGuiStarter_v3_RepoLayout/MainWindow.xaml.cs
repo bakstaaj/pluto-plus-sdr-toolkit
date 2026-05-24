@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+            AudioToolsIntegration.Attach(this);
         ProjectFolderTextBox.Text = GuessDefaultProjectFolder();
         RefreshConfigs();
         RefreshReports();
