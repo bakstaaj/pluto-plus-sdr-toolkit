@@ -5,20 +5,22 @@ set -Eeuo pipefail
 #
 # Standalone release launcher generator.
 #
-# Adds release launchers for:
-#   run_noaa_audio.cmd
-#   run_airband_audio.cmd
-#   run_fm_audio.cmd
+# Permanent audio menu fix:
+#   run_audio_menu.cmd uses ARGS and executes:
+#       "%AUDIO_EXE%" !ARGS!
+#
+# This prevents Windows cmd.exe from treating the whole command line as one
+# executable path.
 #
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.0-audio-modes
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.2-audio-menu-fixed
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.0-audio-modes"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.2-audio-menu-fixed"
     exit 1
 fi
 
@@ -69,14 +71,14 @@ if not exist "%RELEASE_ROOT%\\configs\\${config}" (
     exit /b 1
 )
 
-echo Running Pluto+ ${label} scan session...
+echo Running Pluto+ ${label}...
 echo.
 
 "%BIN_DIR%\\pluto_scan_session.exe" --config "%RELEASE_ROOT%\\configs\\${config}" %*
 
 if errorlevel 1 (
     echo.
-    echo ERROR: ${label} scan session failed.
+    echo ERROR: ${label} failed.
     pause
     exit /b 1
 )
@@ -91,6 +93,12 @@ echo   %SESSION_DIR%
 pause
 EOF
 }
+
+write_scan_launcher "run_fm_scan.cmd" "fm.conf" "fm" "FM broadcast scan"
+write_scan_launcher "run_2m_scan.cmd" "2m.conf" "2m" "2 meter scan"
+write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband scan"
+write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA scan"
+write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm scan"
 
 write_file "run_profile.cmd" <<'EOF'
 @echo off
@@ -107,7 +115,6 @@ if "%~1"=="" (
     echo Examples:
     echo   run_profile.cmd configs\fm.conf
     echo   run_profile.cmd configs\2m.conf --cycles 50
-    echo   run_profile.cmd configs\airband.conf --out-prefix airband_evening
     echo.
     pause
     exit /b 1
@@ -132,7 +139,6 @@ if not exist "%BIN_DIR%\pluto_scan_session.exe" (
 
 mkdir "%SESSION_DIR%" 2>nul
 cd /d "%SESSION_DIR%"
-
 set "PATH=%BIN_DIR%;%PATH%"
 
 "%BIN_DIR%\pluto_scan_session.exe" --config "%RELEASE_ROOT%\%CONFIG_FILE%" %*
@@ -150,12 +156,6 @@ echo   %SESSION_DIR%
 pause
 EOF
 
-write_scan_launcher "run_fm_scan.cmd" "fm.conf" "fm" "FM broadcast scan"
-write_scan_launcher "run_2m_scan.cmd" "2m.conf" "2m" "2 meter scan"
-write_scan_launcher "run_airband_scan.cmd" "airband.conf" "airband" "airband scan"
-write_scan_launcher "run_noaa_scan.cmd" "noaa.conf" "noaa" "NOAA scan"
-write_scan_launcher "run_70cm_scan.cmd" "70cm.conf" "70cm" "70 cm scan"
-
 write_file "run_noaa_audio.cmd" <<'EOF'
 @echo off
 setlocal
@@ -166,7 +166,6 @@ set "SESSION_DIR=%RELEASE_ROOT%\sessions"
 
 mkdir "%SESSION_DIR%" 2>nul
 cd /d "%SESSION_DIR%"
-
 set "PATH=%BIN_DIR%;%PATH%"
 
 if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
@@ -194,11 +193,6 @@ if errorlevel 1 (
 
 echo.
 echo Done.
-echo WAV file:
-echo   %SESSION_DIR%\noaa.wav
-echo CSV log:
-echo   %SESSION_DIR%\audio_log.csv
-
 start "" "%SESSION_DIR%"
 pause
 EOF
@@ -213,7 +207,6 @@ set "SESSION_DIR=%RELEASE_ROOT%\sessions"
 
 mkdir "%SESSION_DIR%" 2>nul
 cd /d "%SESSION_DIR%"
-
 set "PATH=%BIN_DIR%;%PATH%"
 
 if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
@@ -231,7 +224,7 @@ echo   %SESSION_DIR%\airband_am.wav
 echo Output CSV:
 echo   %SESSION_DIR%\audio_log.csv
 echo.
-echo Airband transmissions are intermittent. If this is silent, try a longer run:
+echo Airband transmissions are intermittent. If this is silent, try:
 echo   run_airband_audio.cmd --seconds 180 --squelch-db -70
 echo.
 
@@ -246,11 +239,6 @@ if errorlevel 1 (
 
 echo.
 echo Done.
-echo WAV file:
-echo   %SESSION_DIR%\airband_am.wav
-echo CSV log:
-echo   %SESSION_DIR%\audio_log.csv
-
 start "" "%SESSION_DIR%"
 pause
 EOF
@@ -265,7 +253,6 @@ set "SESSION_DIR=%RELEASE_ROOT%\sessions"
 
 mkdir "%SESSION_DIR%" 2>nul
 cd /d "%SESSION_DIR%"
-
 set "PATH=%BIN_DIR%;%PATH%"
 
 if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
@@ -299,13 +286,187 @@ if errorlevel 1 (
 
 echo.
 echo Done.
-echo WAV file:
-echo   %SESSION_DIR%\fm100.wav
-echo CSV log:
-echo   %SESSION_DIR%\audio_log.csv
-
 start "" "%SESSION_DIR%"
 pause
+EOF
+
+write_file "run_audio_menu.cmd" <<'EOF'
+@echo off
+setlocal EnableDelayedExpansion
+
+REM Pluto+ SDR Audio Menu Launcher
+REM Release version.
+REM
+REM Important:
+REM   This launcher stores only arguments in ARGS and runs:
+REM
+REM     "%AUDIO_EXE%" !ARGS!
+REM
+REM   Do not store the whole executable path plus arguments in one variable.
+
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+set "AUDIO_EXE=%BIN_DIR%\pluto_audio_monitor.exe"
+
+mkdir "%SESSION_DIR%" 2>nul
+cd /d "%SESSION_DIR%"
+set "PATH=%BIN_DIR%;%PATH%"
+
+if not exist "%AUDIO_EXE%" (
+    echo ERROR: pluto_audio_monitor.exe not found:
+    echo   %AUDIO_EXE%
+    echo.
+    echo The release package may be incomplete.
+    pause
+    exit /b 1
+)
+
+:menu
+cls
+echo Pluto+ SDR Audio Menu
+echo =====================
+echo.
+echo Output folder:
+echo   %SESSION_DIR%
+echo.
+echo  1. NOAA NFM, 162.550 MHz, 30 seconds
+echo  2. NOAA NFM, choose NOAA preset
+echo  3. Airband AM, 125.000 MHz, 60 seconds
+echo  4. Airband AM, long capture, 180 seconds
+echo  5. Broadcast FM WBFM, 100.000 MHz, 30 seconds
+echo  6. Broadcast FM WBFM, choose FM preset
+echo  7. Custom frequency and mode
+echo  8. Open sessions folder
+echo  9. Exit
+echo.
+set /p CHOICE="Select option: "
+
+if "%CHOICE%"=="1" goto noaa_default
+if "%CHOICE%"=="2" goto noaa_choose
+if "%CHOICE%"=="3" goto airband_default
+if "%CHOICE%"=="4" goto airband_long
+if "%CHOICE%"=="5" goto fm_default
+if "%CHOICE%"=="6" goto fm_choose
+if "%CHOICE%"=="7" goto custom
+if "%CHOICE%"=="8" goto open_folder
+if "%CHOICE%"=="9" goto done
+
+echo.
+echo Invalid choice.
+pause
+goto menu
+
+:noaa_default
+set "ARGS=--mode nfm --preset noaa7 --rate 960000 --audio-rate 48000 --seconds 30 --squelch-db -65 --wav noaa.wav --csv audio_log.csv"
+goto run_command
+
+:noaa_choose
+cls
+echo NOAA presets:
+echo   noaa1 = 162.400 MHz
+echo   noaa2 = 162.425 MHz
+echo   noaa3 = 162.450 MHz
+echo   noaa4 = 162.475 MHz
+echo   noaa5 = 162.500 MHz
+echo   noaa6 = 162.525 MHz
+echo   noaa7 = 162.550 MHz
+echo.
+set /p PRESET="Enter NOAA preset [noaa7]: "
+if "%PRESET%"=="" set "PRESET=noaa7"
+set "ARGS=--mode nfm --preset %PRESET% --rate 960000 --audio-rate 48000 --seconds 30 --squelch-db -65 --wav %PRESET%.wav --csv audio_log.csv"
+goto run_command
+
+:airband_default
+set "ARGS=--mode am --preset airband-125 --rate 960000 --audio-rate 48000 --seconds 60 --squelch-db -65 --wav airband_am.wav --csv audio_log.csv"
+goto run_command
+
+:airband_long
+set "ARGS=--mode am --preset airband-125 --rate 960000 --audio-rate 48000 --seconds 180 --squelch-db -70 --wav airband_am_180s.wav --csv audio_log.csv"
+goto run_command
+
+:fm_default
+set "ARGS=--preset fm-100 --seconds 30 --squelch-off --wav fm100.wav --csv audio_log.csv"
+goto run_command
+
+:fm_choose
+cls
+echo FM presets:
+echo   fm-88
+echo   fm-90
+echo   fm-94
+echo   fm-98
+echo   fm-100
+echo   fm-102
+echo   fm-104
+echo   fm-106
+echo.
+set /p PRESET="Enter FM preset [fm-100]: "
+if "%PRESET%"=="" set "PRESET=fm-100"
+set "ARGS=--preset %PRESET% --seconds 30 --squelch-off --wav %PRESET%.wav --csv audio_log.csv"
+goto run_command
+
+:custom
+cls
+echo Custom audio capture
+echo.
+echo Modes:
+echo   nfm
+echo   am
+echo   wbfm
+echo.
+set /p MODE="Mode [nfm/am/wbfm]: "
+if "%MODE%"=="" set "MODE=nfm"
+
+set /p FREQ="Frequency Hz, example 162550000: "
+if "%FREQ%"=="" (
+    echo ERROR: frequency is required.
+    pause
+    goto menu
+)
+
+set /p SECONDS="Seconds [30]: "
+if "%SECONDS%"=="" set "SECONDS=30"
+
+set /p WAV="WAV filename [custom_audio.wav]: "
+if "%WAV%"=="" set "WAV=custom_audio.wav"
+
+if /I "%MODE%"=="wbfm" (
+    set "ARGS=--mode wbfm --freq %FREQ% --rate 2400000 --bw 1800000 --audio-lowpass-hz 15000 --seconds %SECONDS% --squelch-off --wav %WAV% --csv audio_log.csv"
+) else if /I "%MODE%"=="am" (
+    set "ARGS=--mode am --freq %FREQ% --rate 960000 --bw 200000 --seconds %SECONDS% --squelch-db -65 --wav %WAV% --csv audio_log.csv"
+) else (
+    set "ARGS=--mode nfm --freq %FREQ% --rate 960000 --bw 200000 --seconds %SECONDS% --squelch-db -65 --wav %WAV% --csv audio_log.csv"
+)
+goto run_command
+
+:open_folder
+start "" "%SESSION_DIR%"
+goto menu
+
+:run_command
+cls
+echo Running:
+echo   "%AUDIO_EXE%" !ARGS!
+echo.
+"%AUDIO_EXE%" !ARGS!
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: audio command failed.
+    pause
+    goto menu
+)
+
+echo.
+echo Done. Output folder:
+echo   %SESSION_DIR%
+echo.
+pause
+goto menu
+
+:done
+exit /b 0
 EOF
 
 write_file "open_sessions_folder.cmd" <<'EOF'
@@ -401,28 +562,25 @@ find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 echo
 echo "Launcher count: ${count}"
 
-if [ "${count}" -lt 13 ]; then
-    echo "ERROR: Expected at least 13 launchers, found ${count}."
+if [ "${count}" -lt 14 ]; then
+    echo "ERROR: Expected at least 14 launchers, found ${count}."
     exit 1
 fi
 
-if ! grep -q -- "--mode nfm" "${LAUNCHER_DIR}/run_noaa_audio.cmd"; then
-    echo "ERROR: run_noaa_audio.cmd is missing --mode nfm"
+for required in run_audio_menu.cmd run_noaa_audio.cmd run_airband_audio.cmd run_fm_audio.cmd; do
+    if [ ! -f "${LAUNCHER_DIR}/${required}" ]; then
+        echo "ERROR: missing launcher ${required}"
+        exit 1
+    fi
+done
+
+if ! grep -q '"%AUDIO_EXE%" !ARGS!' "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
+    echo "ERROR: run_audio_menu.cmd does not contain fixed quoted execution."
     exit 1
 fi
 
-if ! grep -q -- "--mode am" "${LAUNCHER_DIR}/run_airband_audio.cmd"; then
-    echo "ERROR: run_airband_audio.cmd is missing --mode am"
-    exit 1
-fi
-
-if ! grep -q -- "--preset fm-100" "${LAUNCHER_DIR}/run_fm_audio.cmd"; then
-    echo "ERROR: run_fm_audio.cmd is missing --preset fm-100"
-    exit 1
-fi
-
-if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_fm_audio.cmd"; then
-    echo "ERROR: run_fm_audio.cmd is missing --csv audio_log.csv"
+if grep -q '^set "CMD=' "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
+    echo "ERROR: run_audio_menu.cmd still uses unsafe CMD command-string variable."
     exit 1
 fi
 
