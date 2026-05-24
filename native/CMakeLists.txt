@@ -56,3 +56,10 @@ if (MINGW)
         target_compile_options(${target} PRIVATE -Wall -Wextra -O2)
     endforeach()
 endif()
+
+add_executable(pluto_audio_monitor src/pluto_audio_monitor.c)
+target_link_libraries(pluto_audio_monitor PRIVATE PkgConfig::LIBIIO PkgConfig::LIBAD9361 m)
+
+if (MINGW)
+    target_compile_options(pluto_audio_monitor PRIVATE -Wall -Wextra -O2)
+endif()
