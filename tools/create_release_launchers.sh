@@ -5,15 +5,21 @@ set -Eeuo pipefail
 #
 # Standalone release launcher generator.
 #
+# v2 CSV fix:
+#   run_noaa_audio.cmd now passes:
+#     --csv audio_log.csv
+#   so the release session folder gets:
+#     sessions\audio_log.csv
+#
 # Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.7-audio
+#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.8-audio-v2
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.7-audio"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v0.8-audio-v2"
     exit 1
 fi
 
@@ -172,11 +178,13 @@ if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
 )
 
 echo Recording NOAA NFM audio for 30 seconds...
-echo Output:
+echo Output WAV:
 echo   %SESSION_DIR%\noaa.wav
+echo Output CSV:
+echo   %SESSION_DIR%\audio_log.csv
 echo.
 
-"%BIN_DIR%\pluto_audio_monitor.exe" --mode nfm --freq 162550000 --rate 960000 --audio-rate 48000 --seconds 30 --wav noaa.wav %*
+"%BIN_DIR%\pluto_audio_monitor.exe" --mode nfm --preset noaa7 --rate 960000 --audio-rate 48000 --seconds 30 --squelch-db -65 --wav noaa.wav --csv audio_log.csv %*
 
 if errorlevel 1 (
     echo.
@@ -189,6 +197,8 @@ echo.
 echo Done.
 echo WAV file:
 echo   %SESSION_DIR%\noaa.wav
+echo CSV log:
+echo   %SESSION_DIR%\audio_log.csv
 
 start "" "%SESSION_DIR%"
 pause
@@ -213,8 +223,6 @@ if not exist "%GUI_DIR%" (
     echo Session GUI folder was not found.
     echo Expected:
     echo   %GUI_DIR%
-    echo.
-    echo The release may have been created without dotnet available to publish the GUI.
     pause
     exit /b 1
 )
@@ -243,8 +251,6 @@ if not exist "%GUI_DIR%" (
     echo Live Spectrum GUI folder was not found.
     echo Expected:
     echo   %GUI_DIR%
-    echo.
-    echo The release may have been created without dotnet available to publish the GUI.
     pause
     exit /b 1
 )
@@ -293,6 +299,11 @@ echo "Launcher count: ${count}"
 
 if [ "${count}" -lt 11 ]; then
     echo "ERROR: Expected at least 11 launchers, found ${count}."
+    exit 1
+fi
+
+if ! grep -q -- "--csv audio_log.csv" "${LAUNCHER_DIR}/run_noaa_audio.cmd"; then
+    echo "ERROR: run_noaa_audio.cmd is missing --csv audio_log.csv"
     exit 1
 fi
 
