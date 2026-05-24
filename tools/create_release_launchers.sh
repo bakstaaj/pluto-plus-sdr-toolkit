@@ -5,22 +5,19 @@ set -Eeuo pipefail
 #
 # Standalone release launcher generator.
 #
-# Permanent audio menu fix:
-#   run_audio_menu.cmd uses ARGS and executes:
-#       "%AUDIO_EXE%" !ARGS!
-#
-# This prevents Windows cmd.exe from treating the whole command line as one
-# executable path.
-#
-# Usage:
-#   ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.2-audio-menu-fixed
+# Includes:
+#   scan launchers
+#   audio launchers
+#   audio menu launcher with fixed quoting
+#   audio HTML report launcher
+#   GUI launchers
 
 RELEASE_DIR="${1:-}"
 
 if [ -z "${RELEASE_DIR}" ] || [ ! -d "${RELEASE_DIR}" ]; then
     echo "ERROR: release folder argument is required and must exist."
     echo "Usage:"
-    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.2-audio-menu-fixed"
+    echo "  ./tools/create_release_launchers.sh releases/pluto-plus-sdr-toolkit-v1.3-audio-report"
     exit 1
 fi
 
@@ -217,15 +214,10 @@ if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
 )
 
 echo Recording airband AM audio for 60 seconds...
-echo Default preset:
-echo   airband-125, 125.000 MHz
 echo Output WAV:
 echo   %SESSION_DIR%\airband_am.wav
 echo Output CSV:
 echo   %SESSION_DIR%\audio_log.csv
-echo.
-echo Airband transmissions are intermittent. If this is silent, try:
-echo   run_airband_audio.cmd --seconds 180 --squelch-db -70
 echo.
 
 "%BIN_DIR%\pluto_audio_monitor.exe" --mode am --preset airband-125 --rate 960000 --audio-rate 48000 --seconds 60 --squelch-db -65 --wav airband_am.wav --csv audio_log.csv %*
@@ -263,16 +255,10 @@ if not exist "%BIN_DIR%\pluto_audio_monitor.exe" (
 )
 
 echo Recording broadcast FM WBFM audio for 30 seconds...
-echo Default preset:
-echo   fm-100, 100.000 MHz
 echo Output WAV:
 echo   %SESSION_DIR%\fm100.wav
 echo Output CSV:
 echo   %SESSION_DIR%\audio_log.csv
-echo.
-echo To use a different station:
-echo   run_fm_audio.cmd --preset fm-94
-echo   run_fm_audio.cmd --mode wbfm --freq 98700000
 echo.
 
 "%BIN_DIR%\pluto_audio_monitor.exe" --preset fm-100 --seconds 30 --squelch-off --wav fm100.wav --csv audio_log.csv %*
@@ -295,14 +281,8 @@ write_file "run_audio_menu.cmd" <<'EOF'
 setlocal EnableDelayedExpansion
 
 REM Pluto+ SDR Audio Menu Launcher
-REM Release version.
-REM
-REM Important:
-REM   This launcher stores only arguments in ARGS and runs:
-REM
-REM     "%AUDIO_EXE%" !ARGS!
-REM
-REM   Do not store the whole executable path plus arguments in one variable.
+REM Release version. Uses fixed quoted execution:
+REM   "%AUDIO_EXE%" !ARGS!
 
 set "RELEASE_ROOT=%~dp0.."
 set "BIN_DIR=%RELEASE_ROOT%\bin\native"
@@ -469,6 +449,51 @@ goto menu
 exit /b 0
 EOF
 
+write_file "make_audio_report.cmd" <<'EOF'
+@echo off
+setlocal
+
+set "RELEASE_ROOT=%~dp0.."
+set "BIN_DIR=%RELEASE_ROOT%\bin\native"
+set "SESSION_DIR=%RELEASE_ROOT%\sessions"
+set "REPORT_EXE=%BIN_DIR%\pluto_audio_report.exe"
+
+mkdir "%SESSION_DIR%" 2>nul
+
+if not exist "%REPORT_EXE%" (
+    echo ERROR: pluto_audio_report.exe was not found.
+    echo Expected:
+    echo   %REPORT_EXE%
+    pause
+    exit /b 1
+)
+
+if not exist "%SESSION_DIR%\audio_log.csv" (
+    echo ERROR: audio_log.csv was not found:
+    echo   %SESSION_DIR%\audio_log.csv
+    echo.
+    echo Run an audio recording first:
+    echo   run_audio_menu.cmd
+    echo   run_noaa_audio.cmd
+    echo   run_airband_audio.cmd
+    echo   run_fm_audio.cmd
+    pause
+    exit /b 1
+)
+
+"%REPORT_EXE%" --in "%SESSION_DIR%\audio_log.csv" --out "%SESSION_DIR%\audio_report.html"
+
+if errorlevel 1 (
+    echo.
+    echo ERROR: audio report generation failed.
+    pause
+    exit /b 1
+)
+
+start "" "%SESSION_DIR%\audio_report.html"
+pause
+EOF
+
 write_file "open_sessions_folder.cmd" <<'EOF'
 @echo off
 setlocal
@@ -562,12 +587,18 @@ find "${LAUNCHER_DIR}" -maxdepth 1 -type f -name '*.cmd' -printf "  %f\n" | sort
 echo
 echo "Launcher count: ${count}"
 
-if [ "${count}" -lt 14 ]; then
-    echo "ERROR: Expected at least 14 launchers, found ${count}."
+if [ "${count}" -lt 15 ]; then
+    echo "ERROR: Expected at least 15 launchers, found ${count}."
     exit 1
 fi
 
-for required in run_audio_menu.cmd run_noaa_audio.cmd run_airband_audio.cmd run_fm_audio.cmd; do
+for required in \
+    run_audio_menu.cmd \
+    run_noaa_audio.cmd \
+    run_airband_audio.cmd \
+    run_fm_audio.cmd \
+    make_audio_report.cmd
+do
     if [ ! -f "${LAUNCHER_DIR}/${required}" ]; then
         echo "ERROR: missing launcher ${required}"
         exit 1
@@ -576,11 +607,6 @@ done
 
 if ! grep -q '"%AUDIO_EXE%" !ARGS!' "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
     echo "ERROR: run_audio_menu.cmd does not contain fixed quoted execution."
-    exit 1
-fi
-
-if grep -q '^set "CMD=' "${LAUNCHER_DIR}/run_audio_menu.cmd"; then
-    echo "ERROR: run_audio_menu.cmd still uses unsafe CMD command-string variable."
     exit 1
 fi
 

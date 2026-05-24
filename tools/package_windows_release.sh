@@ -5,12 +5,10 @@ set -Eeuo pipefail
 #
 # Consolidated Windows release packager for the Pluto+ SDR Windows Toolkit.
 #
-# WBFM release integration:
-#   - packages pluto_audio_monitor.exe
-#   - creates run_noaa_audio.cmd
-#   - creates run_airband_audio.cmd
-#   - creates run_fm_audio.cmd
-#   - verifies all audio launchers exist
+# Audio report release integration:
+#   - packages pluto_audio_report.exe when present
+#   - creates make_audio_report.cmd
+#   - verifies report launcher and executable
 
 APP_NAME="pluto-plus-sdr-toolkit"
 VERSION="${1:-$(date +%Y%m%d-%H%M%S)}"
@@ -200,7 +198,7 @@ verify_release() {
 
     [ "$exe_count" -gt 0 ] || die "No native EXEs were packaged."
     [ "$config_count" -gt 0 ] || die "No config files were packaged."
-    [ "$launcher_count" -ge 13 ] || die "Expected at least 13 launchers, found ${launcher_count}."
+    [ "$launcher_count" -ge 15 ] || die "Expected at least 15 launchers, found ${launcher_count}."
 
     for required in \
         pluto_scan_session.exe \
@@ -214,6 +212,12 @@ verify_release() {
         [ -f "${LAUNCHER_DIR}/run_noaa_audio.cmd" ] || die "Missing audio launcher: run_noaa_audio.cmd"
         [ -f "${LAUNCHER_DIR}/run_airband_audio.cmd" ] || die "Missing audio launcher: run_airband_audio.cmd"
         [ -f "${LAUNCHER_DIR}/run_fm_audio.cmd" ] || die "Missing audio launcher: run_fm_audio.cmd"
+        [ -f "${LAUNCHER_DIR}/run_audio_menu.cmd" ] || die "Missing audio menu launcher: run_audio_menu.cmd"
+    fi
+
+    if [ -f "${ROOT}/native/src/pluto_audio_report.c" ]; then
+        [ -f "${BIN_DIR}/pluto_audio_report.exe" ] || die "Missing audio report tool: pluto_audio_report.exe"
+        [ -f "${LAUNCHER_DIR}/make_audio_report.cmd" ] || die "Missing audio report launcher: make_audio_report.cmd"
     fi
 
     for required in \
@@ -306,9 +310,11 @@ Quick start:
 
   launchers\run_noaa_scan.cmd
   launchers\run_fm_scan.cmd
+  launchers\run_audio_menu.cmd
   launchers\run_noaa_audio.cmd
   launchers\run_airband_audio.cmd
   launchers\run_fm_audio.cmd
+  launchers\make_audio_report.cmd
   launchers\start_session_gui.cmd
   launchers\start_live_spectrum_gui.cmd
 
@@ -324,6 +330,13 @@ Folder layout:
 Generated reports, WAV files, and CSV files are written to:
 
   sessions\
+
+Audio workflow:
+
+  1. Run launchers\run_audio_menu.cmd
+  2. Record NOAA, airband, or broadcast FM audio
+  3. Run launchers\make_audio_report.cmd
+  4. Review sessions\audio_report.html
 
 Hardware assumption:
 
