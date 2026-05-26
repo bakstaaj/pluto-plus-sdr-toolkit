@@ -1,0 +1,24 @@
+frequency_hz,label
+# NOAA weather / local RF sanity checks
+162400000,NOAA Weather 162.400
+162425000,NOAA Weather 162.425
+162450000,NOAA Weather 162.450
+162475000,NOAA Weather 162.475
+162500000,NOAA Weather 162.500
+162525000,NOAA Weather 162.525
+162550000,NOAA Weather 162.550
+
+# Common amateur simplex/calling checks
+146520000,2m FM Simplex Calling
+146550000,2m FM Simplex
+146580000,2m FM Simplex
+446000000,70cm FM Simplex Calling
+
+# Aircraft band checks
+121500000,Airband Emergency
+122800000,Airband Unicom
+123000000,Airband Unicom
+
+# DTRS/800 MHz sanity checks; adjust for your local control channel
+852425000,800 MHz Check
+853537500,Possible Strong Local Control

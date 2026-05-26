@@ -69,3 +69,47 @@ add_executable(pluto_audio_report src/pluto_audio_report.c)
 if (MINGW)
     target_compile_options(pluto_audio_report PRIVATE -Wall -Wextra -O2)
 endif()
+
+add_executable(pluto_dual_rx_probe src/pluto_dual_rx_probe.c)
+target_link_libraries(pluto_dual_rx_probe PRIVATE PkgConfig::LIBIIO PkgConfig::LIBAD9361 m)
+
+if (MINGW)
+    target_compile_options(pluto_dual_rx_probe PRIVATE -Wall -Wextra -O2)
+endif()
+
+# BEGIN PlutoDualRxPowerScanner
+if(NOT TARGET pluto_dual_rx_power_scan)
+  add_executable(pluto_dual_rx_power_scan src/pluto_dual_rx_power_scan.c)
+
+  if(DEFINED IIO_INCLUDE_DIRS)
+    target_include_directories(pluto_dual_rx_power_scan PRIVATE ${IIO_INCLUDE_DIRS})
+  elseif(DEFINED LIBIIO_INCLUDE_DIRS)
+    target_include_directories(pluto_dual_rx_power_scan PRIVATE ${LIBIIO_INCLUDE_DIRS})
+  endif()
+
+  if(TARGET iio)
+    target_link_libraries(pluto_dual_rx_power_scan PRIVATE iio)
+  elseif(TARGET IIO::iio)
+    target_link_libraries(pluto_dual_rx_power_scan PRIVATE IIO::iio)
+  elseif(DEFINED IIO_LIBRARIES)
+    target_link_libraries(pluto_dual_rx_power_scan PRIVATE ${IIO_LIBRARIES})
+  elseif(DEFINED LIBIIO_LIBRARIES)
+    target_link_libraries(pluto_dual_rx_power_scan PRIVATE ${LIBIIO_LIBRARIES})
+  else()
+    find_library(PLUTO_DUAL_RX_POWER_SCAN_IIO_LIBRARY NAMES iio libiio)
+    if(PLUTO_DUAL_RX_POWER_SCAN_IIO_LIBRARY)
+      target_link_libraries(pluto_dual_rx_power_scan PRIVATE ${PLUTO_DUAL_RX_POWER_SCAN_IIO_LIBRARY})
+    else()
+      target_link_libraries(pluto_dual_rx_power_scan PRIVATE iio)
+    endif()
+  endif()
+
+  if(NOT MSVC)
+    target_link_libraries(pluto_dual_rx_power_scan PRIVATE m)
+  endif()
+
+  if(WIN32)
+    target_compile_definitions(pluto_dual_rx_power_scan PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
+endif()
+# END PlutoDualRxPowerScanner
