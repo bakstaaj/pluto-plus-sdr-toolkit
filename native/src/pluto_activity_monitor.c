@@ -1,806 +1,801 @@
-#include <iio.h>
-#include <ad9361.h>
-#include <fftw3.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
+/*
+ * pluto_activity_monitor.c
+ *
+ * Windows-side Pluto activity monitor with optional dual-RX support.
+ *
+ * Intended project defaults:
+ *   --rx-mode auto
+ *   --rx-combine max
+ *
+ * RX mapping for Pluto+ AD9361 / 2R2T:
+ *   RX1 = cf-ad9361-lpc voltage0 I + voltage1 Q
+ *   RX2 = cf-ad9361-lpc voltage2 I + voltage3 Q
+ *
+ * This is the production Windows-side activity monitor implementation.
+ * It supports single/dual RX selection while preserving host-side operation.
+ *
+ * Build/link requirements:
+ *   libiio headers and library
+ *
+ * Example:
+ *   ./pluto_activity_monitor.exe \
+ *     --uri ip:192.168.2.1 \
+ *     --freq-file configs/activity_rx_test_freqs.csv \
+ *     --rx-mode auto \
+ *     --rx-combine max \
+ *     --threshold-dbfs -55 \
+ *     --csv activity_monitor_rx_host.csv
+ */
 
 #include <errno.h>
-#include <inttypes.h>
+#include <limits.h>
+#include <math.h>
+#include <signal.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <time.h>
 
-#define PI_CONST 3.14159265358979323846
+#ifdef _WIN32
+#include <windows.h>
+#define STRCASECMP _stricmp
+static void sleep_ms(unsigned int ms) { Sleep(ms); }
+#else
+#include <strings.h>
+#include <unistd.h>
+#define STRCASECMP strcasecmp
+static void sleep_ms(unsigned int ms) { usleep((useconds_t)ms * 1000U); }
+#endif
+
+#include <iio.h>
+
+#ifndef ARRAY_LEN
+#define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
+typedef enum {
+    RX_MODE_AUTO = 0,
+    RX_MODE_SINGLE,
+    RX_MODE_DUAL
+} rx_mode_t;
+
+typedef enum {
+    RX_COMBINE_MAX = 0,
+    RX_COMBINE_AVERAGE,
+    RX_COMBINE_SEPARATE
+} rx_combine_t;
 
 typedef struct {
-    double *freqs_hz;
+    long long hz;
+    char label[96];
+} freq_entry_t;
+
+typedef struct {
+    freq_entry_t *items;
     size_t count;
-    size_t capacity;
+    size_t cap;
 } freq_list_t;
 
 typedef struct {
     const char *uri;
-    const char *input_file;
-    const char *csv_file;
+    const char *freq_file;
+    const char *csv_path;
 
-    long long sample_rate_hz;
-    long long bandwidth_hz;
-    long long manual_gain_db;
+    long long start_hz;
+    long long stop_hz;
+    long long step_hz;
+    bool use_range;
 
-    size_t fft_size;
-    size_t buffer_samples;
+    long long sample_rate;
+    long long bandwidth;
+    size_t sample_count;
+    unsigned int settle_ms;
 
-    int averages;
-    int cycles;
-    int settle_ms;
-    int delay_ms;
+    double threshold_dbfs;
 
-    double threshold_db;
-    double passband_hz;
-    double if_offset_hz;
-    double dc_exclude_hz;
+    rx_mode_t rx_mode;
+    rx_combine_t rx_combine;
 
-    const char *gain_mode;
-    bool use_manual_gain;
-} app_config_t;
+    bool verbose;
+} options_t;
 
-static void sleep_ms(int ms)
-{
-#ifdef _WIN32
-    Sleep((DWORD)ms);
-#else
-    usleep((useconds_t)ms * 1000);
-#endif
+typedef struct {
+    double rx1_dbfs;
+    double rx2_dbfs;
+    double combined_dbfs;
+    bool rx1_valid;
+    bool rx2_valid;
+} power_result_t;
+
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_signal(int sig) {
+    (void)sig;
+    g_stop = 1;
 }
 
-static void now_string(char *buf, size_t size)
-{
-    time_t t = time(NULL);
-    struct tm tmv;
-
-#ifdef _WIN32
-    localtime_s(&tmv, &t);
-#else
-    localtime_r(&t, &tmv);
-#endif
-
-    strftime(buf, size, "%Y-%m-%d %H:%M:%S", &tmv);
+static void usage(const char *prog) {
+    printf(
+        "Usage:\n"
+        "  %s --uri ip:192.168.2.1 --freq-file configs/activity_rx_test_freqs.csv [options]\n"
+        "  %s --uri ip:192.168.2.1 --start 144000000 --stop 148000000 --step 25000 [options]\n"
+        "\n"
+        "Options:\n"
+        "  --uri <uri>                 IIO URI. Default: ip:192.168.2.1\n"
+        "  --freq-file <csv>           CSV/text frequency list. First column is frequency.\n"
+        "                              Values below 1,000,000 are treated as MHz.\n"
+        "  --start <hz>                Start frequency for range scan.\n"
+        "  --stop <hz>                 Stop frequency for range scan.\n"
+        "  --step <hz>                 Step size for range scan.\n"
+        "  --rate <hz>                 RX sample rate. Default: 960000\n"
+        "  --bw <hz>                   RF bandwidth. Default: 1000000\n"
+        "  --samples <n>               Samples per frequency. Default: 32768\n"
+        "  --settle-ms <n>             Tuning settle delay. Default: 120\n"
+        "  --threshold-dbfs <db>       Active threshold. Default: -55\n"
+        "  --rx-mode auto|single|dual  Default: auto\n"
+        "  --rx-combine max|average|separate\n"
+        "                              Default: max\n"
+        "  --csv <path>                Output CSV. Default: activity_monitor_rx.csv\n"
+        "  --verbose                   Print per-frequency details.\n"
+        "  --help                      Show this help.\n",
+        prog, prog);
 }
 
-static void print_usage(const char *prog)
-{
-    printf("\n");
-    printf("Pluto+ Activity Monitor - single RX Pluto-compatible mode\n");
-    printf("\n");
-    printf("Usage:\n");
-    printf("  %s --in <grouped.csv> [options]\n", prog);
-    printf("\n");
-    printf("Input file:\n");
-    printf("  The input may be a grouped CSV from pluto_scan_group.exe,\n");
-    printf("  or a simple text file with one frequency in Hz per line.\n");
-    printf("\n");
-    printf("Options:\n");
-    printf("  --uri <uri>             IIO URI, default ip:192.168.2.1\n");
-    printf("  --in <file>             Frequency list or grouped CSV\n");
-    printf("  --csv <file>            Activity log CSV, default activity_log.csv\n");
-    printf("  --rate <hz>             Sample rate Hz, default 1000000\n");
-    printf("  --bw <hz>               RF bandwidth Hz, default equals sample rate\n");
-    printf("  --fft <size>            FFT size, default 16384\n");
-    printf("  --avg <count>           FFT averages per measurement, default 4\n");
-    printf("  --cycles <count>        Number of passes over the list, default 5\n");
-    printf("  --threshold-db <db>     Active threshold over noise floor, default 10\n");
-    printf("  --passband-hz <hz>      Detection window around IF, default 12500\n");
-    printf("  --if-offset-hz <hz>     Tune target to this FFT offset, default 100000\n");
-    printf("  --dc-exclude-hz <hz>    Ignore DC region around 0 Hz, default 10000\n");
-    printf("  --settle-ms <ms>        Delay after tuning, default 100\n");
-    printf("  --delay-ms <ms>         Delay between frequencies, default 0\n");
-    printf("  --gain-mode <mode>      slow_attack, fast_attack, manual, default slow_attack\n");
-    printf("  --gain-db <db>          Manual RX gain dB, implies manual gain mode\n");
-    printf("  --help                  Show this help\n");
-    printf("\n");
-    printf("Examples:\n");
-    printf("  %s --in 2m_grouped.csv --cycles 10 --csv 2m_activity.csv\n", prog);
-    printf("  %s --in airband_grouped.csv --passband-hz 25000 --threshold-db 8\n", prog);
-    printf("  %s --in 2m_grouped.csv --gain-mode manual --gain-db 40 --cycles 20\n", prog);
-    printf("\n");
-}
-
-static bool parse_ll(const char *text, long long *value)
-{
+static bool parse_ll(const char *s, long long *out) {
     char *end = NULL;
     errno = 0;
-    long long v = strtoll(text, &end, 10);
-
-    if (errno != 0 || end == text || *end != '\0') {
+    long long v = strtoll(s, &end, 10);
+    if (errno || end == s || *end != '\0') {
         return false;
     }
-
-    *value = v;
+    *out = v;
     return true;
 }
 
-static bool parse_double_value(const char *text, double *value)
-{
+static bool parse_double(const char *s, double *out) {
     char *end = NULL;
     errno = 0;
-    double v = strtod(text, &end);
-
-    if (errno != 0 || end == text || *end != '\0') {
+    double v = strtod(s, &end);
+    if (errno || end == s || *end != '\0' || !isfinite(v)) {
         return false;
     }
-
-    *value = v;
+    *out = v;
     return true;
 }
 
-static bool parse_size_value(const char *text, size_t *value)
-{
-    char *end = NULL;
-    errno = 0;
-    unsigned long long v = strtoull(text, &end, 10);
-
-    if (errno != 0 || end == text || *end != '\0') {
-        return false;
-    }
-
-    *value = (size_t)v;
-    return true;
-}
-
-static bool parse_int_value(const char *text, int *value)
-{
-    char *end = NULL;
-    errno = 0;
-    long v = strtol(text, &end, 10);
-
-    if (errno != 0 || end == text || *end != '\0') {
-        return false;
-    }
-
-    *value = (int)v;
-    return true;
-}
-
-static bool is_power_of_two(size_t n)
-{
-    return n > 0 && ((n & (n - 1)) == 0);
-}
-
-static bool parse_args(int argc, char **argv, app_config_t *cfg)
-{
-    cfg->uri = "ip:192.168.2.1";
-    cfg->input_file = NULL;
-    cfg->csv_file = "activity_log.csv";
-
-    cfg->sample_rate_hz = 1000000LL;
-    cfg->bandwidth_hz = 0;
-    cfg->manual_gain_db = 30;
-
-    cfg->fft_size = 16384;
-    cfg->buffer_samples = 16384;
-
-    cfg->averages = 4;
-    cfg->cycles = 5;
-    cfg->settle_ms = 100;
-    cfg->delay_ms = 0;
-
-    cfg->threshold_db = 10.0;
-    cfg->passband_hz = 12500.0;
-    cfg->if_offset_hz = 100000.0;
-    cfg->dc_exclude_hz = 10000.0;
-
-    cfg->gain_mode = "slow_attack";
-    cfg->use_manual_gain = false;
-
-    for (int i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
-            print_usage(argv[0]);
-            exit(0);
-        } else if (strcmp(arg, "--uri") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "ERROR: --uri requires a value\n");
-                return false;
-            }
-            cfg->uri = argv[i];
-        } else if (strcmp(arg, "--in") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "ERROR: --in requires a filename\n");
-                return false;
-            }
-            cfg->input_file = argv[i];
-        } else if (strcmp(arg, "--csv") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "ERROR: --csv requires a filename\n");
-                return false;
-            }
-            cfg->csv_file = argv[i];
-        } else if (strcmp(arg, "--rate") == 0) {
-            if (++i >= argc || !parse_ll(argv[i], &cfg->sample_rate_hz)) {
-                fprintf(stderr, "ERROR: --rate requires an integer Hz value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--bw") == 0) {
-            if (++i >= argc || !parse_ll(argv[i], &cfg->bandwidth_hz)) {
-                fprintf(stderr, "ERROR: --bw requires an integer Hz value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--fft") == 0) {
-            if (++i >= argc || !parse_size_value(argv[i], &cfg->fft_size)) {
-                fprintf(stderr, "ERROR: --fft requires an integer size\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--avg") == 0) {
-            if (++i >= argc || !parse_int_value(argv[i], &cfg->averages)) {
-                fprintf(stderr, "ERROR: --avg requires an integer count\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--cycles") == 0) {
-            if (++i >= argc || !parse_int_value(argv[i], &cfg->cycles)) {
-                fprintf(stderr, "ERROR: --cycles requires an integer count\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--threshold-db") == 0) {
-            if (++i >= argc || !parse_double_value(argv[i], &cfg->threshold_db)) {
-                fprintf(stderr, "ERROR: --threshold-db requires a numeric value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--passband-hz") == 0) {
-            if (++i >= argc || !parse_double_value(argv[i], &cfg->passband_hz)) {
-                fprintf(stderr, "ERROR: --passband-hz requires a numeric value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--if-offset-hz") == 0) {
-            if (++i >= argc || !parse_double_value(argv[i], &cfg->if_offset_hz)) {
-                fprintf(stderr, "ERROR: --if-offset-hz requires a numeric value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--dc-exclude-hz") == 0) {
-            if (++i >= argc || !parse_double_value(argv[i], &cfg->dc_exclude_hz)) {
-                fprintf(stderr, "ERROR: --dc-exclude-hz requires a numeric value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--settle-ms") == 0) {
-            if (++i >= argc || !parse_int_value(argv[i], &cfg->settle_ms)) {
-                fprintf(stderr, "ERROR: --settle-ms requires an integer value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--delay-ms") == 0) {
-            if (++i >= argc || !parse_int_value(argv[i], &cfg->delay_ms)) {
-                fprintf(stderr, "ERROR: --delay-ms requires an integer value\n");
-                return false;
-            }
-        } else if (strcmp(arg, "--gain-mode") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "ERROR: --gain-mode requires a value\n");
-                return false;
-            }
-            cfg->gain_mode = argv[i];
-        } else if (strcmp(arg, "--gain-db") == 0) {
-            if (++i >= argc || !parse_ll(argv[i], &cfg->manual_gain_db)) {
-                fprintf(stderr, "ERROR: --gain-db requires an integer dB value\n");
-                return false;
-            }
-            cfg->gain_mode = "manual";
-            cfg->use_manual_gain = true;
-        } else {
-            fprintf(stderr, "ERROR: Unknown option: %s\n", arg);
-            return false;
-        }
-    }
-
-    if (!cfg->input_file) {
-        fprintf(stderr, "ERROR: --in is required\n");
-        return false;
-    }
-
-    if (cfg->sample_rate_hz <= 0 || cfg->averages <= 0 || cfg->cycles <= 0) {
-        fprintf(stderr, "ERROR: rate, averages, and cycles must be greater than zero\n");
-        return false;
-    }
-
-    if (cfg->bandwidth_hz <= 0) {
-        cfg->bandwidth_hz = cfg->sample_rate_hz;
-    }
-
-    if (cfg->fft_size < 256 || !is_power_of_two(cfg->fft_size)) {
-        fprintf(stderr, "ERROR: FFT size must be a power of two and at least 256\n");
-        return false;
-    }
-
-    if (cfg->if_offset_hz <= 0.0 || cfg->passband_hz <= 0.0) {
-        fprintf(stderr, "ERROR: IF offset and passband must be greater than zero\n");
-        return false;
-    }
-
-    if (cfg->if_offset_hz + cfg->passband_hz > ((double)cfg->sample_rate_hz / 2.0)) {
-        fprintf(stderr, "ERROR: IF offset plus passband is too close to Nyquist for this sample rate\n");
-        return false;
-    }
-
-    if (cfg->settle_ms < 0 || cfg->delay_ms < 0 || cfg->dc_exclude_hz < 0.0) {
-        fprintf(stderr, "ERROR: settle, delay, and DC exclude must not be negative\n");
-        return false;
-    }
-
-    cfg->buffer_samples = cfg->fft_size;
-
-    if (strcmp(cfg->gain_mode, "manual") == 0) {
-        cfg->use_manual_gain = true;
-    }
-
-    return true;
-}
-
-static bool append_freq(freq_list_t *list, double freq_hz)
-{
-    if (freq_hz <= 0.0) {
+static bool parse_rx_mode(const char *s, rx_mode_t *out) {
+    if (STRCASECMP(s, "auto") == 0) {
+        *out = RX_MODE_AUTO;
         return true;
     }
-
-    if (list->count >= list->capacity) {
-        size_t new_capacity = list->capacity == 0 ? 64 : list->capacity * 2;
-        double *new_freqs = (double *)realloc(list->freqs_hz, new_capacity * sizeof(double));
-
-        if (!new_freqs) {
-            return false;
-        }
-
-        list->freqs_hz = new_freqs;
-        list->capacity = new_capacity;
+    if (STRCASECMP(s, "single") == 0) {
+        *out = RX_MODE_SINGLE;
+        return true;
     }
+    if (STRCASECMP(s, "dual") == 0) {
+        *out = RX_MODE_DUAL;
+        return true;
+    }
+    return false;
+}
 
-    list->freqs_hz[list->count++] = freq_hz;
+static bool parse_rx_combine(const char *s, rx_combine_t *out) {
+    if (STRCASECMP(s, "max") == 0) {
+        *out = RX_COMBINE_MAX;
+        return true;
+    }
+    if (STRCASECMP(s, "average") == 0) {
+        *out = RX_COMBINE_AVERAGE;
+        return true;
+    }
+    if (STRCASECMP(s, "separate") == 0) {
+        *out = RX_COMBINE_SEPARATE;
+        return true;
+    }
+    return false;
+}
+
+static const char *rx_mode_name(rx_mode_t m) {
+    switch (m) {
+    case RX_MODE_AUTO:
+        return "auto";
+    case RX_MODE_SINGLE:
+        return "single";
+    case RX_MODE_DUAL:
+        return "dual";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *rx_combine_name(rx_combine_t c) {
+    switch (c) {
+    case RX_COMBINE_MAX:
+        return "max";
+    case RX_COMBINE_AVERAGE:
+        return "average";
+    case RX_COMBINE_SEPARATE:
+        return "separate";
+    default:
+        return "unknown";
+    }
+}
+
+static void options_default(options_t *opt) {
+    memset(opt, 0, sizeof(*opt));
+    opt->uri = "ip:192.168.2.1";
+    opt->csv_path = "activity_monitor_rx.csv";
+    opt->sample_rate = 960000;
+    opt->bandwidth = 1000000;
+    opt->sample_count = 32768;
+    opt->settle_ms = 120;
+    opt->threshold_dbfs = -55.0;
+    opt->rx_mode = RX_MODE_AUTO;
+    opt->rx_combine = RX_COMBINE_MAX;
+}
+
+static bool require_arg(int argc, char **argv, int *i) {
+    if (*i + 1 >= argc) {
+        fprintf(stderr, "Missing value for %s\n", argv[*i]);
+        return false;
+    }
+    (*i)++;
     return true;
 }
 
-static bool load_frequencies(const char *filename, freq_list_t *list)
-{
-    FILE *f = fopen(filename, "r");
-    if (!f) {
-        fprintf(stderr, "ERROR: Could not open frequency list: %s\n", filename);
+static bool parse_args(int argc, char **argv, options_t *opt) {
+    options_default(opt);
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+
+        if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
+            usage(argv[0]);
+            exit(0);
+        } else if (strcmp(a, "--uri") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            opt->uri = argv[i];
+        } else if (strcmp(a, "--freq-file") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            opt->freq_file = argv[i];
+        } else if (strcmp(a, "--csv") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            opt->csv_path = argv[i];
+        } else if (strcmp(a, "--start") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &opt->start_hz)) return false;
+            opt->use_range = true;
+        } else if (strcmp(a, "--stop") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &opt->stop_hz)) return false;
+            opt->use_range = true;
+        } else if (strcmp(a, "--step") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &opt->step_hz)) return false;
+            opt->use_range = true;
+        } else if (strcmp(a, "--rate") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &opt->sample_rate)) return false;
+        } else if (strcmp(a, "--bw") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &opt->bandwidth)) return false;
+        } else if (strcmp(a, "--samples") == 0) {
+            long long tmp = 0;
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &tmp) || tmp <= 0) return false;
+            opt->sample_count = (size_t)tmp;
+        } else if (strcmp(a, "--settle-ms") == 0) {
+            long long tmp = 0;
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_ll(argv[i], &tmp) || tmp < 0) return false;
+            opt->settle_ms = (unsigned int)tmp;
+        } else if (strcmp(a, "--threshold-dbfs") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_double(argv[i], &opt->threshold_dbfs)) return false;
+        } else if (strcmp(a, "--rx-mode") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_rx_mode(argv[i], &opt->rx_mode)) {
+                fprintf(stderr, "Invalid --rx-mode: %s\n", argv[i]);
+                return false;
+            }
+        } else if (strcmp(a, "--rx-combine") == 0) {
+            if (!require_arg(argc, argv, &i)) return false;
+            if (!parse_rx_combine(argv[i], &opt->rx_combine)) {
+                fprintf(stderr, "Invalid --rx-combine: %s\n", argv[i]);
+                return false;
+            }
+        } else if (strcmp(a, "--verbose") == 0) {
+            opt->verbose = true;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", a);
+            return false;
+        }
+    }
+
+    if (!opt->freq_file && !opt->use_range) {
+        fprintf(stderr, "Provide either --freq-file or --start/--stop/--step.\n");
         return false;
     }
 
-    char line[1024];
-    long line_number = 0;
-
-    while (fgets(line, sizeof(line), f)) {
-        line_number++;
-        line[strcspn(line, "\r\n")] = '\0';
-
-        if (line[0] == '\0') {
-            continue;
+    if (opt->use_range) {
+        if (opt->start_hz <= 0 || opt->stop_hz <= 0 || opt->step_hz <= 0) {
+            fprintf(stderr, "Range scan requires positive --start, --stop, and --step.\n");
+            return false;
         }
-
-        if (strstr(line, "group_center_hz") || strstr(line, "center_hz")) {
-            continue;
+        if (opt->stop_hz < opt->start_hz) {
+            fprintf(stderr, "--stop must be greater than or equal to --start.\n");
+            return false;
         }
+    }
 
-        char *first = line;
-        char *comma = strchr(line, ',');
+    return true;
+}
 
+static void freq_list_free(freq_list_t *list) {
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static bool freq_list_append(freq_list_t *list, long long hz, const char *label) {
+    if (list->count == list->cap) {
+        size_t new_cap = list->cap ? list->cap * 2 : 64;
+        freq_entry_t *p = (freq_entry_t *)realloc(list->items, new_cap * sizeof(freq_entry_t));
+        if (!p) {
+            return false;
+        }
+        list->items = p;
+        list->cap = new_cap;
+    }
+    list->items[list->count].hz = hz;
+    if (label && *label) {
+        snprintf(list->items[list->count].label, sizeof(list->items[list->count].label), "%s", label);
+    } else {
+        list->items[list->count].label[0] = '\0';
+    }
+    list->count++;
+    return true;
+}
+
+static char *trim(char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) {
+        *--e = '\0';
+    }
+    return s;
+}
+
+static bool load_freq_file(const char *path, freq_list_t *list) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        perror(path);
+        return false;
+    }
+
+    char line[512];
+    unsigned int lineno = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        lineno++;
+        char *s = trim(line);
+        if (!*s || *s == '#') continue;
+
+        char *first = s;
+        char *comma = strchr(s, ',');
+        char *label = NULL;
         if (comma) {
             *comma = '\0';
+            label = trim(comma + 1);
         }
+
+        first = trim(first);
 
         char *end = NULL;
         errno = 0;
-        double freq = strtod(first, &end);
-
-        if (errno != 0 || end == first || freq <= 0.0) {
-            fprintf(stderr, "WARNING: skipping frequency line %ld\n", line_number);
+        double value = strtod(first, &end);
+        if (errno || end == first) {
+            /* Allow a header row like frequency_hz,label. */
             continue;
         }
 
-        if (!append_freq(list, freq)) {
-            fclose(f);
+        long long hz = 0;
+        if (value > 0.0 && value < 1000000.0) {
+            hz = (long long)llround(value * 1000000.0);
+        } else {
+            hz = (long long)llround(value);
+        }
+
+        if (hz <= 0) {
+            fprintf(stderr, "Ignoring invalid frequency on line %u: %s\n", lineno, first);
+            continue;
+        }
+
+        if (!freq_list_append(list, hz, label)) {
+            fclose(fp);
             return false;
         }
     }
 
-    fclose(f);
+    fclose(fp);
     return true;
 }
 
-static int compare_double(const void *a, const void *b)
-{
-    double da = *(const double *)a;
-    double db = *(const double *)b;
-
-    if (da < db) {
-        return -1;
+static bool load_range(const options_t *opt, freq_list_t *list) {
+    for (long long f = opt->start_hz; f <= opt->stop_hz; f += opt->step_hz) {
+        if (!freq_list_append(list, f, "range")) {
+            return false;
+        }
+        if (LLONG_MAX - f < opt->step_hz) {
+            break;
+        }
     }
-
-    if (da > db) {
-        return 1;
-    }
-
-    return 0;
+    return true;
 }
 
-static double bin_offset_hz(size_t bin, size_t fft_size, double sample_rate)
-{
-    if (bin < fft_size / 2) {
-        return ((double)bin * sample_rate) / (double)fft_size;
-    }
-
-    return (((double)bin - (double)fft_size) * sample_rate) / (double)fft_size;
+static struct iio_channel *find_chan(struct iio_device *dev, const char *name, bool output) {
+    return iio_device_find_channel(dev, name, output);
 }
 
-static bool in_range(double value, double center, double width_hz)
-{
-    return fabs(value - center) <= (width_hz / 2.0);
-}
-
-static int write_attr_ll(struct iio_channel *ch, const char *attr, long long value)
-{
-    if (!ch) {
-        fprintf(stderr, "WARNING: missing channel for attr %s\n", attr);
-        return -1;
-    }
-
+static int write_chan_ll(struct iio_channel *ch, const char *attr, long long value, bool warn) {
+    if (!ch) return -1;
     int ret = iio_channel_attr_write_longlong(ch, attr, value);
-    if (ret < 0) {
-        fprintf(stderr, "WARNING: could not set %s = %lld, ret=%d\n", attr, value, ret);
+    if (ret < 0 && warn) {
+        fprintf(stderr, "Warning: failed to write %s=%lld on channel: %d\n", attr, value, ret);
     }
-
     return ret;
 }
 
-static int write_attr_str(struct iio_channel *ch, const char *attr, const char *value)
-{
-    if (!ch) {
-        fprintf(stderr, "WARNING: missing channel for attr %s\n", attr);
-        return -1;
-    }
-
+static int write_chan_str(struct iio_channel *ch, const char *attr, const char *value, bool warn) {
+    if (!ch) return -1;
     int ret = iio_channel_attr_write(ch, attr, value);
-    if (ret < 0) {
-        fprintf(stderr, "WARNING: could not set %s = %s, ret=%d\n", attr, value, ret);
+    if (ret < 0 && warn) {
+        fprintf(stderr, "Warning: failed to write %s=%s on channel: %d\n", attr, value, ret);
     }
-
     return ret;
 }
 
-static void cleanup(
-    struct iio_buffer *rxbuf,
-    struct iio_context *ctx,
-    fftw_plan plan,
-    fftw_complex *fft_in,
-    fftw_complex *fft_out,
-    double *avg_power,
-    double *power_db,
-    double *noise_values,
-    FILE *csv)
-{
-    if (csv) {
-        fclose(csv);
+static bool configure_phy(struct iio_context *ctx, const options_t *opt, bool use_dual) {
+    struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
+    if (!phy) {
+        fprintf(stderr, "Could not find ad9361-phy.\n");
+        return false;
     }
 
-    if (rxbuf) {
-        iio_buffer_destroy(rxbuf);
+    struct iio_channel *rx_lo = find_chan(phy, "altvoltage0", true);
+    struct iio_channel *rx0 = find_chan(phy, "voltage0", false);
+    struct iio_channel *rx1 = find_chan(phy, "voltage1", false);
+
+    if (!rx_lo || !rx0) {
+        fprintf(stderr, "Could not find required AD9361 PHY channels.\n");
+        return false;
     }
 
-    if (ctx) {
-        iio_context_destroy(ctx);
+    write_chan_ll(rx0, "sampling_frequency", opt->sample_rate, true);
+    write_chan_ll(rx0, "rf_bandwidth", opt->bandwidth, true);
+    write_chan_str(rx0, "gain_control_mode", "slow_attack", false);
+
+    if (use_dual && rx1) {
+        write_chan_ll(rx1, "sampling_frequency", opt->sample_rate, false);
+        write_chan_ll(rx1, "rf_bandwidth", opt->bandwidth, false);
+        write_chan_str(rx1, "gain_control_mode", "slow_attack", false);
     }
 
-    if (plan) {
-        fftw_destroy_plan(plan);
-    }
-
-    if (fft_in) {
-        fftw_free(fft_in);
-    }
-
-    if (fft_out) {
-        fftw_free(fft_out);
-    }
-
-    free(avg_power);
-    free(power_db);
-    free(noise_values);
+    return true;
 }
 
-int main(int argc, char **argv)
-{
-    app_config_t cfg;
-
-    if (!parse_args(argc, argv, &cfg)) {
-        print_usage(argv[0]);
-        return 1;
+static bool tune_frequency(struct iio_context *ctx, long long hz) {
+    struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
+    if (!phy) {
+        fprintf(stderr, "Could not find ad9361-phy.\n");
+        return false;
     }
+
+    struct iio_channel *rx_lo = find_chan(phy, "altvoltage0", true);
+    if (!rx_lo) {
+        fprintf(stderr, "Could not find RX_LO altvoltage0.\n");
+        return false;
+    }
+
+    int ret = write_chan_ll(rx_lo, "frequency", hz, true);
+    return ret >= 0;
+}
+
+static double power_to_dbfs(double p) {
+    if (p <= 0.0 || !isfinite(p)) {
+        return -200.0;
+    }
+    return 10.0 * log10(p);
+}
+
+static power_result_t measure_power_once(struct iio_buffer *buf,
+                                         struct iio_channel *rx1_i,
+                                         struct iio_channel *rx1_q,
+                                         struct iio_channel *rx2_i,
+                                         struct iio_channel *rx2_q,
+                                         bool use_dual,
+                                         rx_combine_t combine) {
+    power_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.rx1_dbfs = -200.0;
+    r.rx2_dbfs = -200.0;
+    r.combined_dbfs = -200.0;
+    r.rx1_valid = true;
+    r.rx2_valid = use_dual;
+
+    ssize_t nbytes = iio_buffer_refill(buf);
+    if (nbytes < 0) {
+        fprintf(stderr, "iio_buffer_refill failed: %ld\n", (long)nbytes);
+        r.rx1_valid = false;
+        r.rx2_valid = false;
+        return r;
+    }
+
+    char *end = (char *)iio_buffer_end(buf);
+    ptrdiff_t step = iio_buffer_step(buf);
+
+    char *rx1i = (char *)iio_buffer_first(buf, rx1_i);
+    char *rx1q = (char *)iio_buffer_first(buf, rx1_q);
+    char *rx2i = use_dual ? (char *)iio_buffer_first(buf, rx2_i) : NULL;
+    char *rx2q = use_dual ? (char *)iio_buffer_first(buf, rx2_q) : NULL;
+
+    if (!rx1i || !rx1q || (use_dual && (!rx2i || !rx2q)) || step <= 0) {
+        fprintf(stderr, "Invalid buffer layout.\n");
+        r.rx1_valid = false;
+        r.rx2_valid = false;
+        return r;
+    }
+
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+    size_t count = 0;
+
+    for (; rx1i < end && rx1q < end; rx1i += step, rx1q += step) {
+        int16_t i1 = *(int16_t *)rx1i;
+        int16_t q1 = *(int16_t *)rx1q;
+
+        double fi1 = (double)i1 / 32768.0;
+        double fq1 = (double)q1 / 32768.0;
+        sum1 += (fi1 * fi1 + fq1 * fq1) * 0.5;
+
+        if (use_dual && rx2i < end && rx2q < end) {
+            int16_t i2 = *(int16_t *)rx2i;
+            int16_t q2 = *(int16_t *)rx2q;
+            double fi2 = (double)i2 / 32768.0;
+            double fq2 = (double)q2 / 32768.0;
+            sum2 += (fi2 * fi2 + fq2 * fq2) * 0.5;
+            rx2i += step;
+            rx2q += step;
+        }
+
+        count++;
+    }
+
+    if (count == 0) {
+        r.rx1_valid = false;
+        r.rx2_valid = false;
+        return r;
+    }
+
+    double p1 = sum1 / (double)count;
+    double p2 = use_dual ? (sum2 / (double)count) : 0.0;
+
+    r.rx1_dbfs = power_to_dbfs(p1);
+    if (use_dual) {
+        r.rx2_dbfs = power_to_dbfs(p2);
+    }
+
+    switch (combine) {
+    case RX_COMBINE_MAX:
+        r.combined_dbfs = use_dual ? ((r.rx1_dbfs > r.rx2_dbfs) ? r.rx1_dbfs : r.rx2_dbfs) : r.rx1_dbfs;
+        break;
+    case RX_COMBINE_AVERAGE:
+        r.combined_dbfs = use_dual ? power_to_dbfs((p1 + p2) * 0.5) : r.rx1_dbfs;
+        break;
+    case RX_COMBINE_SEPARATE:
+        /* Keep a useful active decision: either receiver above threshold. */
+        r.combined_dbfs = use_dual ? ((r.rx1_dbfs > r.rx2_dbfs) ? r.rx1_dbfs : r.rx2_dbfs) : r.rx1_dbfs;
+        break;
+    default:
+        r.combined_dbfs = r.rx1_dbfs;
+        break;
+    }
+
+    return r;
+}
+
+int main(int argc, char **argv) {
+    options_t opt;
+    if (!parse_args(argc, argv, &opt)) {
+        usage(argv[0]);
+        return 2;
+    }
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
 
     freq_list_t freqs;
     memset(&freqs, 0, sizeof(freqs));
 
-    if (!load_frequencies(cfg.input_file, &freqs)) {
-        free(freqs.freqs_hz);
-        return 1;
+    if (opt.freq_file) {
+        if (!load_freq_file(opt.freq_file, &freqs)) {
+            freq_list_free(&freqs);
+            return 1;
+        }
+    }
+
+    if (opt.use_range) {
+        if (!load_range(&opt, &freqs)) {
+            freq_list_free(&freqs);
+            return 1;
+        }
     }
 
     if (freqs.count == 0) {
-        fprintf(stderr, "ERROR: No frequencies loaded from %s\n", cfg.input_file);
-        free(freqs.freqs_hz);
+        fprintf(stderr, "No frequencies to scan.\n");
+        freq_list_free(&freqs);
         return 1;
     }
 
-    printf("\n");
-    printf("Pluto+ Activity Monitor\n");
-    printf("-----------------------\n");
-    printf("URI:              %s\n", cfg.uri);
-    printf("Input file:       %s\n", cfg.input_file);
-    printf("Frequencies:      %zu\n", freqs.count);
-    printf("CSV log:          %s\n", cfg.csv_file);
-    printf("Sample rate:      %lld Hz\n", cfg.sample_rate_hz);
-    printf("RF bandwidth:     %lld Hz\n", cfg.bandwidth_hz);
-    printf("FFT size:         %zu\n", cfg.fft_size);
-    printf("Averages:         %d\n", cfg.averages);
-    printf("Cycles:           %d\n", cfg.cycles);
-    printf("Threshold:        %.2f dB\n", cfg.threshold_db);
-    printf("Passband:         %.1f Hz\n", cfg.passband_hz);
-    printf("IF offset:        %.1f Hz\n", cfg.if_offset_hz);
-    printf("DC exclude:       %.1f Hz\n", cfg.dc_exclude_hz);
-    printf("Gain mode:        %s\n", cfg.gain_mode);
+    printf("Pluto Activity Monitor\n");
+    printf("URI: %s\n", opt.uri);
+    printf("Frequencies: %zu\n", freqs.count);
+    printf("Requested RX mode: %s\n", rx_mode_name(opt.rx_mode));
+    printf("RX combine: %s\n", rx_combine_name(opt.rx_combine));
+    printf("Threshold: %.1f dBFS\n", opt.threshold_dbfs);
 
-    if (cfg.use_manual_gain) {
-        printf("Manual gain:      %lld dB\n", cfg.manual_gain_db);
-    }
-
-    printf("\n");
-
-    struct iio_context *ctx = NULL;
-    struct iio_buffer *rxbuf = NULL;
-    FILE *csv = NULL;
-
-    fftw_complex *fft_in = NULL;
-    fftw_complex *fft_out = NULL;
-    fftw_plan plan = NULL;
-
-    double *avg_power = NULL;
-    double *power_db = NULL;
-    double *noise_values = NULL;
-
-    ctx = iio_create_context_from_uri(cfg.uri);
+    struct iio_context *ctx = iio_create_context_from_uri(opt.uri);
     if (!ctx) {
-        fprintf(stderr, "ERROR: Could not open IIO context: %s\n", cfg.uri);
-        free(freqs.freqs_hz);
+        fprintf(stderr, "Failed to create IIO context for URI: %s\n", opt.uri);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
     struct iio_device *rxdev = iio_context_find_device(ctx, "cf-ad9361-lpc");
-
-    if (!phy || !rxdev) {
-        fprintf(stderr, "ERROR: Missing ad9361-phy or cf-ad9361-lpc\n");
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
+    if (!rxdev) {
+        fprintf(stderr, "Could not find cf-ad9361-lpc RX buffer device.\n");
+        iio_context_destroy(ctx);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    struct iio_channel *rx0_i = iio_device_find_channel(rxdev, "voltage0", false);
-    struct iio_channel *rx0_q = iio_device_find_channel(rxdev, "voltage1", false);
-    struct iio_channel *phy_rx0 = iio_device_find_channel(phy, "voltage0", false);
-    struct iio_channel *rx_lo = iio_device_find_channel(phy, "altvoltage0", true);
+    struct iio_channel *rx1_i = find_chan(rxdev, "voltage0", false);
+    struct iio_channel *rx1_q = find_chan(rxdev, "voltage1", false);
+    struct iio_channel *rx2_i = find_chan(rxdev, "voltage2", false);
+    struct iio_channel *rx2_q = find_chan(rxdev, "voltage3", false);
 
-    if (!rx0_i || !rx0_q || !phy_rx0 || !rx_lo) {
-        fprintf(stderr, "ERROR: Missing required Pluto-compatible channels\n");
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
+    bool rx1_ok = (rx1_i && rx1_q);
+    bool rx2_ok = (rx2_i && rx2_q);
+
+    printf("RX1 channels: voltage0/voltage1 %s\n", rx1_ok ? "OK" : "MISSING");
+    printf("RX2 channels: voltage2/voltage3 %s\n", rx2_ok ? "OK" : "MISSING");
+
+    if (!rx1_ok) {
+        fprintf(stderr, "RX1 I/Q channels are required.\n");
+        iio_context_destroy(ctx);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    printf("Configuring baseband...\n");
+    bool use_dual = false;
+    if (opt.rx_mode == RX_MODE_DUAL) {
+        if (!rx2_ok) {
+            fprintf(stderr, "--rx-mode dual requested, but RX2 channels are missing.\n");
+            iio_context_destroy(ctx);
+            freq_list_free(&freqs);
+            return 1;
+        }
+        use_dual = true;
+    } else if (opt.rx_mode == RX_MODE_AUTO) {
+        use_dual = rx2_ok;
+    } else {
+        use_dual = false;
+    }
 
-    int rate_ret = ad9361_set_bb_rate(phy, (unsigned long)cfg.sample_rate_hz);
-    if (rate_ret < 0) {
-        fprintf(stderr, "ERROR: ad9361_set_bb_rate(%lld) failed, ret=%d\n", cfg.sample_rate_hz, rate_ret);
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
+    printf("Effective RX mode: %s\n", use_dual ? "dual" : "single");
+    printf("Dual available: %s\n", rx2_ok ? "yes" : "no");
+
+    if (!configure_phy(ctx, &opt, use_dual)) {
+        iio_context_destroy(ctx);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    write_attr_ll(phy_rx0, "rf_bandwidth", cfg.bandwidth_hz);
-    write_attr_str(phy_rx0, "gain_control_mode", cfg.gain_mode);
-
-    if (cfg.use_manual_gain) {
-        write_attr_ll(phy_rx0, "hardwaregain", cfg.manual_gain_db);
+    iio_channel_enable(rx1_i);
+    iio_channel_enable(rx1_q);
+    if (use_dual) {
+        iio_channel_enable(rx2_i);
+        iio_channel_enable(rx2_q);
     }
 
-    iio_channel_enable(rx0_i);
-    iio_channel_enable(rx0_q);
+    iio_device_set_kernel_buffers_count(rxdev, 1);
 
-    rxbuf = iio_device_create_buffer(rxdev, cfg.buffer_samples, false);
-    if (!rxbuf) {
-        fprintf(stderr, "ERROR: Could not create RX buffer\n");
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
+    struct iio_buffer *buf = iio_device_create_buffer(rxdev, opt.sample_count, false);
+    if (!buf) {
+        fprintf(stderr, "Failed to create RX buffer. sample_count=%zu\n", opt.sample_count);
+        iio_channel_disable(rx1_i);
+        iio_channel_disable(rx1_q);
+        if (use_dual) {
+            iio_channel_disable(rx2_i);
+            iio_channel_disable(rx2_q);
+        }
+        iio_context_destroy(ctx);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    fft_in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * cfg.fft_size);
-    fft_out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * cfg.fft_size);
-    avg_power = (double *)calloc(cfg.fft_size, sizeof(double));
-    power_db = (double *)calloc(cfg.fft_size, sizeof(double));
-    noise_values = (double *)calloc(cfg.fft_size, sizeof(double));
-
-    if (!fft_in || !fft_out || !avg_power || !power_db || !noise_values) {
-        fprintf(stderr, "ERROR: Could not allocate FFT buffers\n");
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
-        return 1;
-    }
-
-    plan = fftw_plan_dft_1d((int)cfg.fft_size, fft_in, fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
-    if (!plan) {
-        fprintf(stderr, "ERROR: Could not create FFTW plan\n");
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
-        return 1;
-    }
-
-    csv = fopen(cfg.csv_file, "w");
+    FILE *csv = fopen(opt.csv_path, "w");
     if (!csv) {
-        fprintf(stderr, "ERROR: Could not open CSV log: %s\n", cfg.csv_file);
-        cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-        free(freqs.freqs_hz);
+        perror(opt.csv_path);
+        iio_buffer_destroy(buf);
+        iio_context_destroy(ctx);
+        freq_list_free(&freqs);
         return 1;
     }
 
-    fprintf(csv, "timestamp,cycle,target_hz,tune_lo_hz,if_offset_hz,best_offset_hz,best_freq_hz,power_db,noise_floor_db,snr_db,active\n");
+    fprintf(csv, "frequency_hz,label,effective_rx_mode,rx_combine,rx1_dbfs,rx2_dbfs,combined_dbfs,threshold_dbfs,active\n");
 
-    printf("Starting monitor...\n\n");
+    size_t active_count = 0;
+    for (size_t idx = 0; idx < freqs.count && !g_stop; idx++) {
+        long long f = freqs.items[idx].hz;
+        const char *label = freqs.items[idx].label;
 
-    for (int cycle = 1; cycle <= cfg.cycles; cycle++) {
-        printf("Cycle %d / %d\n", cycle, cfg.cycles);
-
-        for (size_t fi = 0; fi < freqs.count; fi++) {
-            double target_hz = freqs.freqs_hz[fi];
-            long long tune_lo_hz = (long long)(target_hz - cfg.if_offset_hz + 0.5);
-
-            if (tune_lo_hz <= 0) {
-                fprintf(stderr, "WARNING: skipping %.3f Hz because LO would be invalid\n", target_hz);
-                continue;
-            }
-
-            write_attr_ll(rx_lo, "frequency", tune_lo_hz);
-            sleep_ms(cfg.settle_ms);
-
-            /*
-               Discard one stale buffer after retune.
-            */
-            iio_buffer_refill(rxbuf);
-
-            memset(avg_power, 0, sizeof(double) * cfg.fft_size);
-
-            for (int avg = 0; avg < cfg.averages; avg++) {
-                ssize_t nbytes = iio_buffer_refill(rxbuf);
-
-                if (nbytes < 0) {
-                    fprintf(stderr, "ERROR: RX buffer refill failed: %zd\n", nbytes);
-                    cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-                    free(freqs.freqs_hz);
-                    return 1;
-                }
-
-                char *p_i = (char *)iio_buffer_first(rxbuf, rx0_i);
-                char *p_q = (char *)iio_buffer_first(rxbuf, rx0_q);
-                char *p_end = (char *)iio_buffer_end(rxbuf);
-                ptrdiff_t p_inc = iio_buffer_step(rxbuf);
-
-                size_t n = 0;
-
-                for (; p_i < p_end && p_q < p_end && n < cfg.fft_size; p_i += p_inc, p_q += p_inc, n++) {
-                    int16_t i_sample = 0;
-                    int16_t q_sample = 0;
-
-                    memcpy(&i_sample, p_i, sizeof(int16_t));
-                    memcpy(&q_sample, p_q, sizeof(int16_t));
-
-                    double window = 0.5 * (1.0 - cos((2.0 * PI_CONST * (double)n) / (double)(cfg.fft_size - 1)));
-
-                    fft_in[n][0] = ((double)i_sample / 32768.0) * window;
-                    fft_in[n][1] = ((double)q_sample / 32768.0) * window;
-                }
-
-                while (n < cfg.fft_size) {
-                    fft_in[n][0] = 0.0;
-                    fft_in[n][1] = 0.0;
-                    n++;
-                }
-
-                fftw_execute(plan);
-
-                for (size_t k = 0; k < cfg.fft_size; k++) {
-                    double re = fft_out[k][0];
-                    double im = fft_out[k][1];
-                    avg_power[k] += re * re + im * im;
-                }
-            }
-
-            double best_power_db = -1e300;
-            double best_offset_hz = 0.0;
-            size_t noise_count = 0;
-
-            for (size_t k = 0; k < cfg.fft_size; k++) {
-                avg_power[k] /= (double)cfg.averages;
-                power_db[k] = 10.0 * log10(avg_power[k] + 1e-30);
-
-                double offset_hz = bin_offset_hz(k, cfg.fft_size, (double)cfg.sample_rate_hz);
-
-                bool is_signal_bin = in_range(offset_hz, cfg.if_offset_hz, cfg.passband_hz);
-                bool is_dc_bin = fabs(offset_hz) <= cfg.dc_exclude_hz;
-
-                if (is_signal_bin) {
-                    if (power_db[k] > best_power_db) {
-                        best_power_db = power_db[k];
-                        best_offset_hz = offset_hz;
-                    }
-                } else if (!is_dc_bin) {
-                    noise_values[noise_count++] = power_db[k];
-                }
-            }
-
-            if (noise_count == 0) {
-                fprintf(stderr, "WARNING: no noise bins available for %.3f Hz\n", target_hz);
-                continue;
-            }
-
-            qsort(noise_values, noise_count, sizeof(double), compare_double);
-            double noise_floor_db = noise_values[noise_count / 2];
-
-            double snr_db = best_power_db - noise_floor_db;
-            bool active = snr_db >= cfg.threshold_db;
-            double best_freq_hz = (double)tune_lo_hz + best_offset_hz;
-
-            char ts[64];
-            now_string(ts, sizeof(ts));
-
-            printf("  %10.6f MHz  SNR %7.2f dB  %-6s  best %.6f MHz\n",
-                   target_hz / 1e6,
-                   snr_db,
-                   active ? "ACTIVE" : "quiet",
-                   best_freq_hz / 1e6);
-
-            fprintf(csv,
-                    "%s,%d,%.3f,%lld,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%d\n",
-                    ts,
-                    cycle,
-                    target_hz,
-                    tune_lo_hz,
-                    cfg.if_offset_hz,
-                    best_offset_hz,
-                    best_freq_hz,
-                    best_power_db,
-                    noise_floor_db,
-                    snr_db,
-                    active ? 1 : 0);
-
+        if (!tune_frequency(ctx, f)) {
+            fprintf(stderr, "Tune failed for %lld Hz\n", f);
+            fprintf(csv, "%lld,%s,%s,%s,,,,%.2f,tune_failed\n",
+                    f, label, use_dual ? "dual" : "single",
+                    rx_combine_name(opt.rx_combine),
+                    opt.threshold_dbfs);
             fflush(csv);
-
-            if (cfg.delay_ms > 0) {
-                sleep_ms(cfg.delay_ms);
-            }
+            continue;
         }
 
-        printf("\n");
+        sleep_ms(opt.settle_ms);
+
+        power_result_t p = measure_power_once(buf, rx1_i, rx1_q, rx2_i, rx2_q, use_dual, opt.rx_combine);
+        bool active = p.combined_dbfs >= opt.threshold_dbfs;
+        if (active) active_count++;
+
+        fprintf(csv, "%lld,%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%s\n",
+                f,
+                label,
+                use_dual ? "dual" : "single",
+                rx_combine_name(opt.rx_combine),
+                p.rx1_dbfs,
+                use_dual ? p.rx2_dbfs : -200.0,
+                p.combined_dbfs,
+                opt.threshold_dbfs,
+                active ? "yes" : "no");
+        fflush(csv);
+
+        if (opt.verbose || active) {
+            if (use_dual) {
+                printf("%10lld Hz  RX1=%7.2f dBFS  RX2=%7.2f dBFS  combined=%7.2f  %s%s\n",
+                       f, p.rx1_dbfs, p.rx2_dbfs, p.combined_dbfs,
+                       active ? "ACTIVE" : "idle",
+                       label && *label ? "  " : "");
+            } else {
+                printf("%10lld Hz  RX1=%7.2f dBFS  combined=%7.2f  %s%s\n",
+                       f, p.rx1_dbfs, p.combined_dbfs,
+                       active ? "ACTIVE" : "idle",
+                       label && *label ? "  " : "");
+            }
+        }
     }
 
-    printf("Activity monitor complete.\n");
-    printf("CSV log written: %s\n", cfg.csv_file);
+    printf("Done. Active frequencies: %zu / %zu\n", active_count, freqs.count);
+    printf("CSV: %s\n", opt.csv_path);
 
-    cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, noise_values, csv);
-    free(freqs.freqs_hz);
+    fclose(csv);
+    iio_buffer_destroy(buf);
+    iio_channel_disable(rx1_i);
+    iio_channel_disable(rx1_q);
+    if (use_dual) {
+        iio_channel_disable(rx2_i);
+        iio_channel_disable(rx2_q);
+    }
+    iio_context_destroy(ctx);
+    freq_list_free(&freqs);
 
-    return 0;
+    return g_stop ? 130 : 0;
 }
