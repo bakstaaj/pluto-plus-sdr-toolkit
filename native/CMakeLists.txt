@@ -113,3 +113,40 @@ if(NOT TARGET pluto_dual_rx_power_scan)
   endif()
 endif()
 # END PlutoDualRxPowerScanner
+
+# BEGIN PlutoActivityMonitorRxOptions
+if(NOT TARGET pluto_activity_monitor_rx)
+  add_executable(pluto_activity_monitor_rx src/pluto_activity_monitor_rx.c)
+
+  if(DEFINED IIO_INCLUDE_DIRS)
+    target_include_directories(pluto_activity_monitor_rx PRIVATE ${IIO_INCLUDE_DIRS})
+  elseif(DEFINED LIBIIO_INCLUDE_DIRS)
+    target_include_directories(pluto_activity_monitor_rx PRIVATE ${LIBIIO_INCLUDE_DIRS})
+  endif()
+
+  if(TARGET iio)
+    target_link_libraries(pluto_activity_monitor_rx PRIVATE iio)
+  elseif(TARGET IIO::iio)
+    target_link_libraries(pluto_activity_monitor_rx PRIVATE IIO::iio)
+  elseif(DEFINED IIO_LIBRARIES)
+    target_link_libraries(pluto_activity_monitor_rx PRIVATE ${IIO_LIBRARIES})
+  elseif(DEFINED LIBIIO_LIBRARIES)
+    target_link_libraries(pluto_activity_monitor_rx PRIVATE ${LIBIIO_LIBRARIES})
+  else()
+    find_library(PLUTO_ACTIVITY_MONITOR_RX_IIO_LIBRARY NAMES iio libiio)
+    if(PLUTO_ACTIVITY_MONITOR_RX_IIO_LIBRARY)
+      target_link_libraries(pluto_activity_monitor_rx PRIVATE ${PLUTO_ACTIVITY_MONITOR_RX_IIO_LIBRARY})
+    else()
+      target_link_libraries(pluto_activity_monitor_rx PRIVATE iio)
+    endif()
+  endif()
+
+  if(NOT MSVC)
+    target_link_libraries(pluto_activity_monitor_rx PRIVATE m)
+  endif()
+
+  if(WIN32)
+    target_compile_definitions(pluto_activity_monitor_rx PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
+endif()
+# END PlutoActivityMonitorRxOptions
