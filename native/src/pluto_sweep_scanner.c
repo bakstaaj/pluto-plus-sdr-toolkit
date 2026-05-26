@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,6 +19,18 @@
 #include <math.h>
 
 #define PI_CONST 3.14159265358979323846
+
+typedef enum {
+    RX_MODE_AUTO = 0,
+    RX_MODE_SINGLE,
+    RX_MODE_DUAL
+} rx_mode_t;
+
+typedef enum {
+    RX_COMBINE_MAX = 0,
+    RX_COMBINE_AVERAGE,
+    RX_COMBINE_SEPARATE
+} rx_combine_t;
 
 typedef struct {
     const char *uri;
@@ -42,6 +55,8 @@ typedef struct {
     double dc_exclude_hz;
 
     const char *gain_mode;
+    rx_mode_t rx_mode;
+    rx_combine_t rx_combine;
     bool use_manual_gain;
     bool write_csv;
 } app_config_t;
@@ -58,7 +73,7 @@ static void sleep_ms(int ms)
 static void print_usage(const char *prog)
 {
     printf("\n");
-    printf("Pluto+ Sweep Scanner - single RX Pluto-compatible mode\n");
+    printf("Pluto+ Sweep Scanner - Pluto+ dual RX capable mode\n");
     printf("\n");
     printf("Usage:\n");
     printf("  %s [options]\n", prog);
@@ -79,6 +94,9 @@ static void print_usage(const char *prog)
     printf("  --settle-ms <ms>        Delay after tuning, default 100\n");
     printf("  --gain-mode <mode>      slow_attack, fast_attack, manual, default slow_attack\n");
     printf("  --gain-db <db>          Manual RX gain dB, only used with manual gain mode\n");
+    printf("  --rx-mode <mode>        auto, single, dual. Default auto\n");
+    printf("  --rx-combine <mode>     max, average, separate. Default max\n");
+    printf("                          separate keeps CSV-compatible max behavior for sweep output\n");
     printf("  --csv <file>            Write detected peaks to CSV\n");
     printf("  --help                  Show this help\n");
     printf("\n");
@@ -149,6 +167,42 @@ static bool parse_int_value(const char *text, int *value)
     return true;
 }
 
+static bool parse_rx_mode_value(const char *text, rx_mode_t *value)
+{
+    if (strcmp(text, "auto") == 0) { *value = RX_MODE_AUTO; return true; }
+    if (strcmp(text, "single") == 0) { *value = RX_MODE_SINGLE; return true; }
+    if (strcmp(text, "dual") == 0) { *value = RX_MODE_DUAL; return true; }
+    return false;
+}
+
+static bool parse_rx_combine_value(const char *text, rx_combine_t *value)
+{
+    if (strcmp(text, "max") == 0) { *value = RX_COMBINE_MAX; return true; }
+    if (strcmp(text, "average") == 0) { *value = RX_COMBINE_AVERAGE; return true; }
+    if (strcmp(text, "separate") == 0) { *value = RX_COMBINE_SEPARATE; return true; }
+    return false;
+}
+
+static const char *rx_mode_name(rx_mode_t mode)
+{
+    switch (mode) {
+    case RX_MODE_AUTO: return "auto";
+    case RX_MODE_SINGLE: return "single";
+    case RX_MODE_DUAL: return "dual";
+    default: return "unknown";
+    }
+}
+
+static const char *rx_combine_name(rx_combine_t combine)
+{
+    switch (combine) {
+    case RX_COMBINE_MAX: return "max";
+    case RX_COMBINE_AVERAGE: return "average";
+    case RX_COMBINE_SEPARATE: return "separate";
+    default: return "unknown";
+    }
+}
+
 static bool is_power_of_two(size_t n)
 {
     return n > 0 && ((n & (n - 1)) == 0);
@@ -178,6 +232,8 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
     cfg->dc_exclude_hz = 5000.0;
 
     cfg->gain_mode = "slow_attack";
+    cfg->rx_mode = RX_MODE_AUTO;
+    cfg->rx_combine = RX_COMBINE_MAX;
     cfg->use_manual_gain = false;
     cfg->write_csv = false;
 
@@ -265,6 +321,16 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
                 return false;
             }
             cfg->use_manual_gain = true;
+        } else if (strcmp(arg, "--rx-mode") == 0) {
+            if (++i >= argc || !parse_rx_mode_value(argv[i], &cfg->rx_mode)) {
+                fprintf(stderr, "ERROR: --rx-mode requires auto, single, or dual\n");
+                return false;
+            }
+        } else if (strcmp(arg, "--rx-combine") == 0) {
+            if (++i >= argc || !parse_rx_combine_value(argv[i], &cfg->rx_combine)) {
+                fprintf(stderr, "ERROR: --rx-combine requires max, average, or separate\n");
+                return false;
+            }
         } else if (strcmp(arg, "--csv") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "ERROR: --csv requires a filename\n");
@@ -404,6 +470,45 @@ static void block_nearby_bins(unsigned char *blocked, size_t fft_size, size_t ce
     }
 }
 
+static bool load_fft_input_from_channels(struct iio_buffer *rxbuf,
+                                         struct iio_channel *ch_i,
+                                         struct iio_channel *ch_q,
+                                         size_t fft_size,
+                                         fftw_complex *fft_in)
+{
+    char *p_i = (char *)iio_buffer_first(rxbuf, ch_i);
+    char *p_q = (char *)iio_buffer_first(rxbuf, ch_q);
+    char *p_end = (char *)iio_buffer_end(rxbuf);
+    ptrdiff_t p_inc = iio_buffer_step(rxbuf);
+
+    if (!p_i || !p_q || p_inc <= 0) {
+        return false;
+    }
+
+    size_t n = 0;
+
+    for (; p_i < p_end && p_q < p_end && n < fft_size; p_i += p_inc, p_q += p_inc, n++) {
+        int16_t i_sample = 0;
+        int16_t q_sample = 0;
+
+        memcpy(&i_sample, p_i, sizeof(int16_t));
+        memcpy(&q_sample, p_q, sizeof(int16_t));
+
+        double window = 0.5 * (1.0 - cos((2.0 * PI_CONST * (double)n) / (double)(fft_size - 1)));
+
+        fft_in[n][0] = ((double)i_sample / 32768.0) * window;
+        fft_in[n][1] = ((double)q_sample / 32768.0) * window;
+    }
+
+    while (n < fft_size) {
+        fft_in[n][0] = 0.0;
+        fft_in[n][1] = 0.0;
+        n++;
+    }
+
+    return true;
+}
+
 static void cleanup(
     struct iio_buffer *rxbuf,
     struct iio_context *ctx,
@@ -471,6 +576,8 @@ int main(int argc, char **argv)
     printf("DC exclude:       %.1f Hz\n", cfg.dc_exclude_hz);
     printf("Settle:           %d ms\n", cfg.settle_ms);
     printf("Gain mode:        %s\n", cfg.gain_mode);
+    printf("Requested RX mode:%s\n", cfg.rx_mode == RX_MODE_AUTO ? " auto" : (cfg.rx_mode == RX_MODE_SINGLE ? " single" : " dual"));
+    printf("RX combine:       %s\n", rx_combine_name(cfg.rx_combine));
 
     if (cfg.use_manual_gain) {
         printf("Manual gain:      %lld dB\n", cfg.manual_gain_db);
@@ -495,6 +602,7 @@ int main(int argc, char **argv)
     double *avg_power = NULL;
     double *power_db = NULL;
     double *sort_copy = NULL;
+    double *tmp_power = NULL;
     unsigned char *blocked_bins = NULL;
 
     ctx = iio_create_context_from_uri(cfg.uri);
@@ -522,14 +630,39 @@ int main(int argc, char **argv)
 
     struct iio_channel *rx0_i = iio_device_find_channel(rxdev, "voltage0", false);
     struct iio_channel *rx0_q = iio_device_find_channel(rxdev, "voltage1", false);
+    struct iio_channel *rx2_i = iio_device_find_channel(rxdev, "voltage2", false);
+    struct iio_channel *rx2_q = iio_device_find_channel(rxdev, "voltage3", false);
 
     struct iio_channel *phy_rx0 = iio_device_find_channel(phy, "voltage0", false);
+    struct iio_channel *phy_rx1 = iio_device_find_channel(phy, "voltage1", false);
     struct iio_channel *rx_lo = iio_device_find_channel(phy, "altvoltage0", true);
 
     if (!rx0_i || !rx0_q || !phy_rx0 || !rx_lo) {
-        fprintf(stderr, "ERROR: Missing required Pluto-compatible RX channels\n");
+        fprintf(stderr, "ERROR: Missing required Pluto-compatible RX1 channels\n");
         cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
         return 1;
+    }
+
+    bool rx2_ok = (rx2_i && rx2_q);
+    bool use_dual = false;
+
+    if (cfg.rx_mode == RX_MODE_DUAL) {
+        if (!rx2_ok) {
+            fprintf(stderr, "ERROR: --rx-mode dual requested, but RX2 voltage2/voltage3 channels are missing\n");
+            cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
+            return 1;
+        }
+        use_dual = true;
+    } else if (cfg.rx_mode == RX_MODE_AUTO) {
+        use_dual = rx2_ok;
+    }
+
+    printf("RX1 channels: voltage0/voltage1 OK\n");
+    printf("RX2 channels: voltage2/voltage3 %s\n", rx2_ok ? "OK" : "MISSING");
+    printf("Effective RX mode: %s\n", use_dual ? "dual" : "single");
+    printf("Dual available: %s\n", rx2_ok ? "yes" : "no");
+    if (cfg.rx_combine == RX_COMBINE_SEPARATE && use_dual) {
+        printf("Note: --rx-combine separate is accepted; sweep CSV remains compatible and uses max peak selection.\n");
     }
 
     printf("Configuring Pluto+ baseband...\n");
@@ -546,12 +679,25 @@ int main(int argc, char **argv)
     write_attr_ll(phy_rx0, "rf_bandwidth", cfg.bandwidth_hz);
     write_attr_str(phy_rx0, "gain_control_mode", cfg.gain_mode);
 
+    if (use_dual && phy_rx1) {
+        write_attr_ll(phy_rx1, "sampling_frequency", cfg.sample_rate_hz);
+        write_attr_ll(phy_rx1, "rf_bandwidth", cfg.bandwidth_hz);
+        write_attr_str(phy_rx1, "gain_control_mode", cfg.gain_mode);
+    }
+
     if (cfg.use_manual_gain) {
         write_attr_ll(phy_rx0, "hardwaregain", cfg.manual_gain_db);
+        if (use_dual && phy_rx1) {
+            write_attr_ll(phy_rx1, "hardwaregain", cfg.manual_gain_db);
+        }
     }
 
     iio_channel_enable(rx0_i);
     iio_channel_enable(rx0_q);
+    if (use_dual) {
+        iio_channel_enable(rx2_i);
+        iio_channel_enable(rx2_q);
+    }
 
     rxbuf = iio_device_create_buffer(rxdev, cfg.buffer_samples, false);
     if (!rxbuf) {
@@ -565,9 +711,10 @@ int main(int argc, char **argv)
     avg_power = (double *)calloc(cfg.fft_size, sizeof(double));
     power_db = (double *)calloc(cfg.fft_size, sizeof(double));
     sort_copy = (double *)calloc(cfg.fft_size, sizeof(double));
+    tmp_power = (double *)calloc(cfg.fft_size, sizeof(double));
     blocked_bins = (unsigned char *)calloc(cfg.fft_size, sizeof(unsigned char));
 
-    if (!fft_in || !fft_out || !avg_power || !power_db || !sort_copy || !blocked_bins) {
+    if (!fft_in || !fft_out || !avg_power || !power_db || !sort_copy || !tmp_power || !blocked_bins) {
         fprintf(stderr, "ERROR: Could not allocate FFT buffers\n");
         cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
         return 1;
@@ -618,30 +765,11 @@ int main(int argc, char **argv)
                 return 1;
             }
 
-            char *p_i = (char *)iio_buffer_first(rxbuf, rx0_i);
-            char *p_q = (char *)iio_buffer_first(rxbuf, rx0_q);
-            char *p_end = (char *)iio_buffer_end(rxbuf);
-            ptrdiff_t p_inc = iio_buffer_step(rxbuf);
-
-            size_t n = 0;
-
-            for (; p_i < p_end && p_q < p_end && n < cfg.fft_size; p_i += p_inc, p_q += p_inc, n++) {
-                int16_t i_sample = 0;
-                int16_t q_sample = 0;
-
-                memcpy(&i_sample, p_i, sizeof(int16_t));
-                memcpy(&q_sample, p_q, sizeof(int16_t));
-
-                double window = 0.5 * (1.0 - cos((2.0 * PI_CONST * (double)n) / (double)(cfg.fft_size - 1)));
-
-                fft_in[n][0] = ((double)i_sample / 32768.0) * window;
-                fft_in[n][1] = ((double)q_sample / 32768.0) * window;
-            }
-
-            while (n < cfg.fft_size) {
-                fft_in[n][0] = 0.0;
-                fft_in[n][1] = 0.0;
-                n++;
+            if (!load_fft_input_from_channels(rxbuf, rx0_i, rx0_q, cfg.fft_size, fft_in)) {
+                fprintf(stderr, "ERROR: Invalid RX1 buffer layout\n");
+                cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
+                free(tmp_power);
+                return 1;
             }
 
             fftw_execute(plan);
@@ -649,8 +777,39 @@ int main(int argc, char **argv)
             for (size_t k = 0; k < cfg.fft_size; k++) {
                 double re = fft_out[k][0];
                 double im = fft_out[k][1];
-                double mag2 = re * re + im * im;
-                avg_power[k] += mag2;
+                tmp_power[k] = re * re + im * im;
+            }
+
+            if (use_dual) {
+                if (!load_fft_input_from_channels(rxbuf, rx2_i, rx2_q, cfg.fft_size, fft_in)) {
+                    fprintf(stderr, "ERROR: Invalid RX2 buffer layout\n");
+                    cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
+                    free(tmp_power);
+                    return 1;
+                }
+
+                fftw_execute(plan);
+
+                for (size_t k = 0; k < cfg.fft_size; k++) {
+                    double re = fft_out[k][0];
+                    double im = fft_out[k][1];
+                    double mag2_rx2 = re * re + im * im;
+                    double mag2 = tmp_power[k];
+
+                    if (cfg.rx_combine == RX_COMBINE_AVERAGE) {
+                        mag2 = 0.5 * (tmp_power[k] + mag2_rx2);
+                    } else {
+                        if (mag2_rx2 > mag2) {
+                            mag2 = mag2_rx2;
+                        }
+                    }
+
+                    avg_power[k] += mag2;
+                }
+            } else {
+                for (size_t k = 0; k < cfg.fft_size; k++) {
+                    avg_power[k] += tmp_power[k];
+                }
             }
         }
 
@@ -751,6 +910,7 @@ int main(int argc, char **argv)
         printf("CSV written: %s\n", cfg.csv_file);
     }
 
+    free(tmp_power);
     cleanup(rxbuf, ctx, plan, fft_in, fft_out, avg_power, power_db, sort_copy, blocked_bins, csv);
     return 0;
 }

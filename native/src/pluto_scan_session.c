@@ -29,6 +29,8 @@ typedef struct {
     const char *config_file;
     const char *out_prefix;
     const char *gain_mode;
+    const char *rx_mode;
+    const char *rx_combine;
     const char *summary_sort;
     const char *report_out;
     const char *report_title;
@@ -125,6 +127,8 @@ static void print_usage(const char *prog)
     printf("  --passband-hz <hz>             Activity passband width\n");
     printf("  --gain-mode <mode>             slow_attack, fast_attack, manual\n");
     printf("  --gain-db <db>                 Manual gain dB, implies manual gain mode\n");
+    printf("  --rx-mode <mode>               auto, single, dual. Default auto\n");
+    printf("  --rx-combine <mode>            max, average, separate. Default max\n");
     printf("  --summary-sort <mode>          freq or activity. Default activity\n");
     printf("  --min-active-hits <count>      Summary filter, default 0\n");
     printf("  --skip-scan                    Reuse existing <prefix>_grouped.csv\n");
@@ -333,6 +337,18 @@ static bool apply_config_value(app_config_t *cfg, const char *key, const char *v
         cfg->has_passband = true;
     } else if (strcmp(key, "gain_mode") == 0) {
         return set_string(&cfg->gain_mode, value);
+    } else if (strcmp(key, "rx_mode") == 0) {
+        if (strcmp(value, "auto") != 0 && strcmp(value, "single") != 0 && strcmp(value, "dual") != 0) {
+            fprintf(stderr, "ERROR: rx_mode must be auto, single, or dual\n");
+            return false;
+        }
+        return set_string(&cfg->rx_mode, value);
+    } else if (strcmp(key, "rx_combine") == 0) {
+        if (strcmp(value, "max") != 0 && strcmp(value, "average") != 0 && strcmp(value, "separate") != 0) {
+            fprintf(stderr, "ERROR: rx_combine must be max, average, or separate\n");
+            return false;
+        }
+        return set_string(&cfg->rx_combine, value);
     } else if (strcmp(key, "gain_db") == 0) {
         if (!parse_ll(value, &cfg->gain_db)) {
             fprintf(stderr, "ERROR: invalid config value for gain_db: %s\n", value);
@@ -459,6 +475,8 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
     cfg->config_file = NULL;
     cfg->out_prefix = NULL;
     cfg->gain_mode = "slow_attack";
+    cfg->rx_mode = "auto";
+    cfg->rx_combine = "max";
     cfg->summary_sort = "activity";
     cfg->report_out = NULL;
     cfg->report_title = "Pluto+ SDR Scan Session Report";
@@ -603,6 +621,26 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg)
             }
             cfg->gain_mode = "manual";
             cfg->use_gain_db = true;
+        } else if (strcmp(arg, "--rx-mode") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "ERROR: --rx-mode requires auto, single, or dual\n");
+                return false;
+            }
+            if (strcmp(argv[i], "auto") != 0 && strcmp(argv[i], "single") != 0 && strcmp(argv[i], "dual") != 0) {
+                fprintf(stderr, "ERROR: --rx-mode must be auto, single, or dual\n");
+                return false;
+            }
+            cfg->rx_mode = argv[i];
+        } else if (strcmp(arg, "--rx-combine") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "ERROR: --rx-combine requires max, average, or separate\n");
+                return false;
+            }
+            if (strcmp(argv[i], "max") != 0 && strcmp(argv[i], "average") != 0 && strcmp(argv[i], "separate") != 0) {
+                fprintf(stderr, "ERROR: --rx-combine must be max, average, or separate\n");
+                return false;
+            }
+            cfg->rx_combine = argv[i];
         } else if (strcmp(arg, "--summary-sort") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "ERROR: --summary-sort requires freq or activity\n");
@@ -833,6 +871,8 @@ int main(int argc, char **argv)
     printf("Activity passband:     %.1f Hz\n", cfg.passband_hz);
     printf("Activity averages:     %d\n", cfg.activity_avg);
     printf("Gain mode:             %s\n", cfg.gain_mode);
+    printf("RX mode:               %s\n", cfg.rx_mode);
+    printf("RX combine:            %s\n", cfg.rx_combine);
 
     if (cfg.use_gain_db) {
         printf("Manual gain:           %lld dB\n", cfg.gain_db);
@@ -876,6 +916,11 @@ int main(int argc, char **argv)
             }
         }
 
+        if (!appendf(cmd, sizeof(cmd), "--rx-mode \"%s\" --rx-combine \"%s\" ", cfg.rx_mode, cfg.rx_combine)) {
+            fprintf(stderr, "ERROR: command buffer overflow\n");
+            return 1;
+        }
+
         if (cfg.use_gain_db) {
             if (!appendf(cmd, sizeof(cmd), "--gain-db %lld ", cfg.gain_db)) {
                 fprintf(stderr, "ERROR: command buffer overflow\n");
@@ -903,34 +948,20 @@ int main(int argc, char **argv)
         if (!appendf(cmd, sizeof(cmd),
                      "call \"%s\\pluto_activity_monitor.exe\" "
                      "--uri \"%s\" "
-                     "--in \"%s\" "
-                     "--cycles %d "
-                     "--threshold-db %.3f "
-                     "--passband-hz %.3f "
-                     "--avg %d "
+                     "--freq-file \"%s\" "
+                     "--threshold-dbfs %.3f "
+                     "--rx-mode \"%s\" "
+                     "--rx-combine \"%s\" "
                      "--csv \"%s\" ",
                      tool_dir,
                      cfg.uri,
                      grouped_csv,
-                     cfg.cycles,
                      cfg.activity_threshold_db,
-                     cfg.passband_hz,
-                     cfg.activity_avg,
+                     cfg.rx_mode,
+                     cfg.rx_combine,
                      activity_csv)) {
             fprintf(stderr, "ERROR: command buffer overflow\n");
             return 1;
-        }
-
-        if (cfg.use_gain_db) {
-            if (!appendf(cmd, sizeof(cmd), "--gain-db %lld ", cfg.gain_db)) {
-                fprintf(stderr, "ERROR: command buffer overflow\n");
-                return 1;
-            }
-        } else {
-            if (!appendf(cmd, sizeof(cmd), "--gain-mode \"%s\" ", cfg.gain_mode)) {
-                fprintf(stderr, "ERROR: command buffer overflow\n");
-                return 1;
-            }
         }
 
         int ret = run_command("Activity monitor", cmd, cfg.dry_run);

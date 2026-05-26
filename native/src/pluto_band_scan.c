@@ -38,6 +38,8 @@ typedef struct {
     const char *tool_dir;
     const char *out_prefix;
     const char *gain_mode;
+    const char *rx_mode;
+    const char *rx_combine;
     long long gain_db;
     bool use_gain_db;
     bool no_group;
@@ -93,6 +95,8 @@ static void print_usage(const char *prog) {
     printf("  --avg <count>          Override FFT averages\n");
     printf("  --gain-mode <mode>     slow_attack, fast_attack, manual, default slow_attack\n");
     printf("  --gain-db <db>         Manual gain dB, implies manual gain mode\n");
+    printf("  --rx-mode <mode>       auto, single, dual. Default auto\n");
+    printf("  --rx-combine <mode>    max, average, separate. Default max\n");
     printf("  --sort snr             Grouped CSV sorted by strongest SNR instead of frequency\n");
     printf("  --no-group             Only run sweep scanner, do not group CSV\n");
     printf("  --dry-run              Print commands but do not execute them\n");
@@ -122,6 +126,7 @@ static const band_preset_t *find_preset(const char *id) {
 
 static bool parse_args(int argc, char **argv, app_config_t *cfg) {
     cfg->band = NULL; cfg->uri = "ip:192.168.2.1"; cfg->tool_dir = NULL; cfg->out_prefix = NULL; cfg->gain_mode = "slow_attack";
+    cfg->rx_mode = "auto"; cfg->rx_combine = "max";
     cfg->gain_db = 30; cfg->use_gain_db = false; cfg->no_group = false; cfg->dry_run = false; cfg->sort_snr = false;
     cfg->threshold_override = 0.0; cfg->has_threshold_override = false; cfg->avg_override = 0; cfg->has_avg_override = false;
     for (int i = 1; i < argc; i++) {
@@ -135,6 +140,8 @@ static bool parse_args(int argc, char **argv, app_config_t *cfg) {
         else if (strcmp(arg, "--avg") == 0) { if (++i >= argc || !parse_int_value(argv[i], &cfg->avg_override)) { fprintf(stderr, "ERROR: --avg requires an integer count\n"); return false; } cfg->has_avg_override = true; }
         else if (strcmp(arg, "--gain-mode") == 0) { if (++i >= argc) { fprintf(stderr, "ERROR: --gain-mode requires a value\n"); return false; } cfg->gain_mode = argv[i]; cfg->use_gain_db = (strcmp(cfg->gain_mode, "manual") == 0); }
         else if (strcmp(arg, "--gain-db") == 0) { if (++i >= argc || !parse_ll(argv[i], &cfg->gain_db)) { fprintf(stderr, "ERROR: --gain-db requires an integer dB value\n"); return false; } cfg->gain_mode = "manual"; cfg->use_gain_db = true; }
+        else if (strcmp(arg, "--rx-mode") == 0) { if (++i >= argc) { fprintf(stderr, "ERROR: --rx-mode requires auto, single, or dual\n"); return false; } if (strcmp(argv[i], "auto") != 0 && strcmp(argv[i], "single") != 0 && strcmp(argv[i], "dual") != 0) { fprintf(stderr, "ERROR: --rx-mode must be auto, single, or dual\n"); return false; } cfg->rx_mode = argv[i]; }
+        else if (strcmp(arg, "--rx-combine") == 0) { if (++i >= argc) { fprintf(stderr, "ERROR: --rx-combine requires max, average, or separate\n"); return false; } if (strcmp(argv[i], "max") != 0 && strcmp(argv[i], "average") != 0 && strcmp(argv[i], "separate") != 0) { fprintf(stderr, "ERROR: --rx-combine must be max, average, or separate\n"); return false; } cfg->rx_combine = argv[i]; }
         else if (strcmp(arg, "--sort") == 0) { if (++i >= argc) { fprintf(stderr, "ERROR: --sort requires freq or snr\n"); return false; } if (strcmp(argv[i], "snr") == 0) cfg->sort_snr = true; else if (strcmp(argv[i], "freq") == 0) cfg->sort_snr = false; else { fprintf(stderr, "ERROR: --sort must be freq or snr\n"); return false; } }
         else if (strcmp(arg, "--no-group") == 0) cfg->no_group = true;
         else if (strcmp(arg, "--dry-run") == 0) cfg->dry_run = true;
@@ -172,14 +179,14 @@ int main(int argc, char **argv) {
     printf("Device assumption: Pluto+ RX minimum %.3f MHz\n", (double)PLUTO_PLUS_DEFAULT_MIN_HZ / 1e6);
     printf("Band:             %s\nDescription:      %s\nURI:              %s\nTool directory:   %s\n", preset->id, preset->description, cfg.uri, tool_dir);
     printf("Start:            %lld Hz\nStop:             %lld Hz\nStep:             %lld Hz\nSample rate:      %lld Hz\nBandwidth:        %lld Hz\n", preset->start_hz, preset->stop_hz, preset->step_hz, preset->rate_hz, preset->bw_hz);
-    printf("FFT size:         %d\nAverages:         %d\nThreshold:        %.2f dB\nMerge spacing:    %.1f Hz\nDC exclude:       %.1f Hz\nGain mode:        %s\n", preset->fft_size, averages, threshold_db, preset->merge_hz, preset->dc_exclude_hz, cfg.gain_mode);
+    printf("FFT size:         %d\nAverages:         %d\nThreshold:        %.2f dB\nMerge spacing:    %.1f Hz\nDC exclude:       %.1f Hz\nGain mode:        %s\nRX mode:          %s\nRX combine:       %s\n", preset->fft_size, averages, threshold_db, preset->merge_hz, preset->dc_exclude_hz, cfg.gain_mode, cfg.rx_mode, cfg.rx_combine);
     if (cfg.use_gain_db) printf("Manual gain:      %lld dB\n", cfg.gain_db);
     printf("Raw CSV:          %s\n", raw_csv); if (!cfg.no_group) printf("Grouped CSV:      %s\n", grouped_csv);
     char sweep_cmd[4096];
     if (cfg.use_gain_db) {
-        snprintf(sweep_cmd, sizeof(sweep_cmd), "call \"%s\\pluto_sweep_scanner.exe\" --uri \"%s\" --start %lld --stop %lld --step %lld --rate %lld --bw %lld --fft %d --avg %d --threshold-db %.3f --dc-exclude-hz %.3f --gain-mode manual --gain-db %lld --csv \"%s\"", tool_dir, cfg.uri, preset->start_hz, preset->stop_hz, preset->step_hz, preset->rate_hz, preset->bw_hz, preset->fft_size, averages, threshold_db, preset->dc_exclude_hz, cfg.gain_db, raw_csv);
+        snprintf(sweep_cmd, sizeof(sweep_cmd), "call \"%s\\pluto_sweep_scanner.exe\" --uri \"%s\" --start %lld --stop %lld --step %lld --rate %lld --bw %lld --fft %d --avg %d --threshold-db %.3f --dc-exclude-hz %.3f --gain-mode manual --gain-db %lld --rx-mode \"%s\" --rx-combine \"%s\" --csv \"%s\"", tool_dir, cfg.uri, preset->start_hz, preset->stop_hz, preset->step_hz, preset->rate_hz, preset->bw_hz, preset->fft_size, averages, threshold_db, preset->dc_exclude_hz, cfg.gain_db, cfg.rx_mode, cfg.rx_combine, raw_csv);
     } else {
-        snprintf(sweep_cmd, sizeof(sweep_cmd), "call \"%s\\pluto_sweep_scanner.exe\" --uri \"%s\" --start %lld --stop %lld --step %lld --rate %lld --bw %lld --fft %d --avg %d --threshold-db %.3f --dc-exclude-hz %.3f --gain-mode \"%s\" --csv \"%s\"", tool_dir, cfg.uri, preset->start_hz, preset->stop_hz, preset->step_hz, preset->rate_hz, preset->bw_hz, preset->fft_size, averages, threshold_db, preset->dc_exclude_hz, cfg.gain_mode, raw_csv);
+        snprintf(sweep_cmd, sizeof(sweep_cmd), "call \"%s\\pluto_sweep_scanner.exe\" --uri \"%s\" --start %lld --stop %lld --step %lld --rate %lld --bw %lld --fft %d --avg %d --threshold-db %.3f --dc-exclude-hz %.3f --gain-mode \"%s\" --rx-mode \"%s\" --rx-combine \"%s\" --csv \"%s\"", tool_dir, cfg.uri, preset->start_hz, preset->stop_hz, preset->step_hz, preset->rate_hz, preset->bw_hz, preset->fft_size, averages, threshold_db, preset->dc_exclude_hz, cfg.gain_mode, cfg.rx_mode, cfg.rx_combine, raw_csv);
     }
     int ret = run_command("Sweep", sweep_cmd, cfg.dry_run); if (ret != 0) return 1;
     if (cfg.no_group) { printf("\nDone. Raw CSV written: %s\n", raw_csv); return 0; }
