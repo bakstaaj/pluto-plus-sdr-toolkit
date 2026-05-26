@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+APP_ROOT="${APP_ROOT:-/mnt/jffs2/pluto_ham_scan}"; [ -f "$APP_ROOT/tools/pluto_storage_env.sh" ]&&. "$APP_ROOT/tools/pluto_storage_env.sh"||true
+DATA_ROOT="${DATA_ROOT:-/tmp/pluto_ham_scan}"; SESSION_DIR="${SESSION_DIR:-$DATA_ROOT/sessions}"; STORAGE_BACKEND="${STORAGE_BACKEND:-unknown}"
+echo "Pluto+ storage status"; echo "====================="; echo "APP_ROOT: $APP_ROOT"; echo "STORAGE_BACKEND: $STORAGE_BACKEND"; echo "DATA_ROOT: $DATA_ROOT"; echo "SESSION_DIR: $SESSION_DIR"; [ "$STORAGE_BACKEND" = tmpfs ]&&echo "NOTE: /tmp storage is volatile."; echo; echo "Mounts:"; grep -E " /mnt/jffs2 | /mnt/sdcard | /mnt/usb | /tmp " /proc/mounts||true; echo; echo "Block devices:"; cat /proc/partitions||true; echo; echo "Disk:"; df -h "$APP_ROOT" "$DATA_ROOT" /tmp 2>/dev/null||true; echo; echo "Links:"; for n in data sessions captures uploads downloads logs reports tmp; do p="$APP_ROOT/$n"; [ -L "$p" ]&&echo "  $p -> $(readlink "$p")"||{ [ -e "$p" ]&&echo "  $p exists, not symlink"||echo "  $p missing";}; done; echo; echo "Recent sessions:"; [ -d "$SESSION_DIR" ]&&ls -lh "$SESSION_DIR"|tail -20||true

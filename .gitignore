@@ -48,3 +48,21 @@ spectrum_*.csv
 *.bak
 .DS_Store
 Thumbs.db
+
+# Runtime/test output
+*_host.csv
+/sessions/
+
+# Generated release packages
+/releases/*.zip
+/releases/*/
+
+# Local backup/scratch files
+*.bak
+*.bak_*
+/main
+native/CMakeLists_*_snippet.txt
+
+# Local scanner test output
+dual_rx_*.csv
+*_test_notes.txt

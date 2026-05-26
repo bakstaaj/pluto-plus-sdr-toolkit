@@ -29,9 +29,11 @@ cd /d "%SESSION_DIR%"
 echo Recording NOAA NFM audio for 30 seconds...
 echo Output:
 echo   %SESSION_DIR%\noaa.wav
+echo CSV:
+echo   %SESSION_DIR%\audio_log.csv
 echo.
 
-"%AUDIO_EXE%" --mode nfm --freq 162550000 --rate 960000 --audio-rate 48000 --seconds 30 --wav noaa.wav %*
+"%AUDIO_EXE%" --mode nfm --preset noaa7 --rate 960000 --audio-rate 48000 --seconds 30 --squelch-db -65 --wav noaa.wav --csv audio_log.csv %*
 
 if errorlevel 1 (
     echo.
@@ -44,4 +46,6 @@ echo.
 echo Done.
 echo WAV file:
 echo   %SESSION_DIR%\noaa.wav
+echo CSV log:
+echo   %SESSION_DIR%\audio_log.csv
 pause
